@@ -467,22 +467,122 @@
                         android:textStyle="bold" />
 
                     <Button
+                        android:id="@+id/btnPickFolder"
+                        style="@style/Widget.Material3.Button.TonalButton"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginEnd="6dp"
+                        android:backgroundTint="#0369A1"
+                        android:text="📁 Pick Folder"
+                        android:textColor="#FFFFFF"
+                        android:textSize="11sp"
+                        android:textStyle="bold" />
+
+                    <Button
                         android:id="@+id/btnSyncCatalog"
                         style="@style/Widget.Material3.Button.TextButton"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:text="Re-Index"
                         android:textColor="#38BDF8"
-                        android:textSize="12sp" />
+                        android:textSize="11sp" />
                 </LinearLayout>
 
-                <!-- Files container (populated dynamically) -->
+                <!-- Current Folder Indicator Row -->
                 <LinearLayout
-                    android:id="@+id/containerFilesList"
+                    android:id="@+id/layoutFolderInfo"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="8dp"
-                    android:orientation="vertical" />
+                    android:background="#0F172A"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal"
+                    android:paddingHorizontal="12dp"
+                    android:paddingVertical="4dp">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="📂 "
+                        android:textSize="12sp" />
+
+                    <TextView
+                        android:id="@+id/textCurrentFolder"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:ellipsize="middle"
+                        android:fontFamily="monospace"
+                        android:singleLine="true"
+                        android:text="Folder: Default App Vault"
+                        android:textColor="#38BDF8"
+                        android:textSize="11sp" />
+
+                    <Button
+                        android:id="@+id/btnResetFolder"
+                        style="@style/Widget.Material3.Button.TextButton"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:minWidth="0dp"
+                        android:paddingHorizontal="8dp"
+                        android:text="Reset"
+                        android:textColor="#94A3B8"
+                        android:textSize="10sp" />
+                </LinearLayout>
+
+                <!-- Quick Filter / Search Bar (visible if files exist) -->
+                <com.google.android.material.textfield.TextInputLayout
+                    android:id="@+id/layoutFilterFiles"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:visibility="gone"
+                    app:boxBackgroundColor="#0B0F19"
+                    app:boxCornerRadiusBottomEnd="8dp"
+                    app:boxCornerRadiusBottomStart="8dp"
+                    app:boxCornerRadiusTopEnd="8dp"
+                    app:boxCornerRadiusTopStart="8dp"
+                    app:boxStrokeColor="#38BDF8"
+                    app:boxStrokeWidth="1dp"
+                    app:hintEnabled="false">
+
+                    <com.google.android.material.textfield.TextInputEditText
+                        android:id="@+id/editFilterFiles"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:background="@null"
+                        android:fontFamily="sans-serif"
+                        android:hint="🔍 Filter indexed files..."
+                        android:inputType="text"
+                        android:paddingHorizontal="12dp"
+                        android:paddingVertical="8dp"
+                        android:textColor="#F8FAFC"
+                        android:textColorHint="#64748B"
+                        android:textSize="12sp" />
+                </com.google.android.material.textfield.TextInputLayout>
+
+                <!-- Empty State Message -->
+                <TextView
+                    android:id="@+id/textEmptyFiles"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp"
+                    android:gravity="center"
+                    android:paddingVertical="16dp"
+                    android:text="No files indexed in this folder yet."
+                    android:textColor="#64748B"
+                    android:textSize="13sp"
+                    android:visibility="gone" />
+
+                <!-- Scrollable Files RecyclerView -->
+                <androidx.recyclerview.widget.RecyclerView
+                    android:id="@+id/recyclerFilesList"
+                    android:layout_width="match_parent"
+                    android:layout_height="320dp"
+                    android:layout_marginTop="8dp"
+                    android:nestedScrollingEnabled="true"
+                    android:scrollbars="vertical"
+                    android:fadeScrollbars="false" />
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 

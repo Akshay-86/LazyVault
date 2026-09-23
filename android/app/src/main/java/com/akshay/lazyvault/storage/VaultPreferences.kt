@@ -73,6 +73,56 @@ class VaultPreferences(context: Context) {
             ?: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
         set(value) = prefs.edit().putString("root_merkle_hash", value).apply()
 
+    var selectedFolderUri: String?
+        get() = prefs.getString("selected_folder_uri", null)
+        set(value) = prefs.edit().putString("selected_folder_uri", value).apply()
+
+    var selectedFolderName: String?
+        get() = prefs.getString("selected_folder_name", null)
+        set(value) = prefs.edit().putString("selected_folder_name", value).apply()
+
+    fun saveFileMappings(uriMap: Map<String, String>, sizeMap: Map<String, Long>) {
+        val uriObj = JSONObject()
+        for ((k, v) in uriMap) {
+            uriObj.put(k, v)
+        }
+        val sizeObj = JSONObject()
+        for ((k, v) in sizeMap) {
+            sizeObj.put(k, v)
+        }
+        prefs.edit()
+            .putString("file_uri_mappings", uriObj.toString())
+            .putString("file_size_mappings", sizeObj.toString())
+            .apply()
+    }
+
+    fun getFileUri(key: String): String? {
+        val raw = prefs.getString("file_uri_mappings", null) ?: return null
+        return try {
+            val obj = JSONObject(raw)
+            if (obj.has(key)) obj.getString(key) else null
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    fun getFileSize(key: String): Long {
+        val raw = prefs.getString("file_size_mappings", null) ?: return 0L
+        return try {
+            val obj = JSONObject(raw)
+            if (obj.has(key)) obj.getLong(key) else 0L
+        } catch (e: Exception) {
+            0L
+        }
+    }
+
+    fun clearFileMappings() {
+        prefs.edit()
+            .remove("file_uri_mappings")
+            .remove("file_size_mappings")
+            .apply()
+    }
+
     fun regenerateVaultId(): String {
         val newId = "vlt_" + UUID.randomUUID().toString().replace("-", "").take(10)
         vaultId = newId

@@ -44,6 +44,9 @@ dependencies {
     implementation(libs.androidx.navigation.fragment.ktx)
     implementation(libs.androidx.navigation.ui.ktx)
 
+    // DocumentFile for SAF folder picking
+    implementation("androidx.documentfile:documentfile:1.0.1")
+
     // WorkManager (Periodic background indexing)
     implementation("androidx.work:work-runtime-ktx:2.9.0")
 

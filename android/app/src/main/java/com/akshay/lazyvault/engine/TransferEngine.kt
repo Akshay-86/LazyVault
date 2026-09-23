@@ -6,6 +6,7 @@ import android.util.Log
 import com.akshay.lazyvault.data.AuditLogEntry
 import com.akshay.lazyvault.net.VaultApiClient
 import com.akshay.lazyvault.storage.VaultPreferences
+import com.akshay.lazyvault.storage.VaultStorageManager
 import io.webrtc.*
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -33,6 +34,8 @@ class TransferEngine(private val context: Context) {
         const val BUFFERED_AMOUNT_LOW_THRESHOLD = 512 * 1024L // 512KB backpressure threshold
     }
 
+    private val storageManager = VaultStorageManager(context)
+
     suspend fun executeTransfer(
         requestId: String,
         path: String,
@@ -45,12 +48,16 @@ class TransferEngine(private val context: Context) {
         Log.d(TAG, "Starting lease execution for $requestId. Supported: $supportedTransports")
         onProgress(5, "Resolving file from local vault...")
 
-        val file = resolveVaultFile(path)
-        if (!file.exists() || file.length() == 0L) {
-            Log.e(TAG, "File does not exist: ${file.absolutePath}")
+        val fileSize = storageManager.getFileSize(path, targetSha256)
+        val testStream = storageManager.openInputStream(path, targetSha256)
+        if (testStream == null) {
+            Log.e(TAG, "File cannot be opened or does not exist: $path ($targetSha256)")
             onProgress(0, "Error: File not found on device storage")
             return@withContext false
         }
+        try {
+            testStream.close()
+        } catch (ignored: Exception) {}
 
         var transportUsed = "relay"
         var success = false
@@ -58,23 +65,23 @@ class TransferEngine(private val context: Context) {
         // Check if Relay is requested or available (zero-trust, instantaneous, highly resilient)
         if (supportedTransports.contains("relay")) {
             onProgress(15, "Starting encrypted ephemeral zero-trust relay...")
-            success = executeRelayTransfer(backendUrl, requestId, file, targetSha256, onProgress)
+            success = executeRelayTransfer(backendUrl, requestId, path, targetSha256, onProgress)
             transportUsed = "relay"
         } else if (supportedTransports.contains("webrtc")) {
             onProgress(10, "Attempting WebRTC P2P DataChannel transfer...")
-            val webrtcSuccess = executeWebRtcTransfer(backendUrl, requestId, file, targetSha256, onProgress)
+            val webrtcSuccess = executeWebRtcTransfer(backendUrl, requestId, path, targetSha256, onProgress)
             if (webrtcSuccess) {
                 success = true
                 transportUsed = "webrtc"
             } else {
                 Log.w(TAG, "WebRTC transfer could not complete or timed out. Falling back to Encrypted Ephemeral Relay.")
                 onProgress(20, "WebRTC peer unavailable. Falling back to encrypted relay...")
-                success = executeRelayTransfer(backendUrl, requestId, file, targetSha256, onProgress)
+                success = executeRelayTransfer(backendUrl, requestId, path, targetSha256, onProgress)
                 transportUsed = "relay"
             }
         } else {
             // Default to relay
-            success = executeRelayTransfer(backendUrl, requestId, file, targetSha256, onProgress)
+            success = executeRelayTransfer(backendUrl, requestId, path, targetSha256, onProgress)
             transportUsed = "relay"
         }
 
@@ -86,7 +93,7 @@ class TransferEngine(private val context: Context) {
                 requester = "Client Lease",
                 transport = transportUsed,
                 timestamp = System.currentTimeMillis(),
-                details = "${file.length()} bytes transferred via $transportUsed"
+                details = "$fileSize bytes transferred via $transportUsed"
             )
         )
 
@@ -99,7 +106,7 @@ class TransferEngine(private val context: Context) {
     private suspend fun executeWebRtcTransfer(
         backendUrl: String,
         requestId: String,
-        file: File,
+        path: String,
         targetSha256: String,
         onProgress: (percent: Int, status: String) -> Unit
     ): Boolean = withContext(Dispatchers.IO) {
@@ -253,11 +260,18 @@ class TransferEngine(private val context: Context) {
             val dc = activeDataChannel!!
             onProgress(30, "Streaming file over WebRTC DataChannel...")
 
-            val fileLength = file.length()
+            val fileLength = storageManager.getFileSize(path, targetSha256)
+            val inputStream = storageManager.openInputStream(path, targetSha256) ?: run {
+                Log.e(TAG, "Failed to open input stream for $path ($targetSha256)")
+                peerConnection.close()
+                factory.dispose()
+                return@withContext false
+            }
+
             var bytesSent = 0L
             val buffer = ByteArray(CHUNK_SIZE)
 
-            FileInputStream(file).use { fis ->
+            inputStream.use { fis ->
                 var read: Int
                 while (fis.read(buffer).also { read = it } != -1) {
                     val chunkBytes = if (read == CHUNK_SIZE) buffer else buffer.copyOf(read)
@@ -272,7 +286,7 @@ class TransferEngine(private val context: Context) {
                     dc.send(dataBuffer)
                     bytesSent += read
 
-                    val percent = 30 + ((bytesSent.toDouble() / fileLength) * 60).toInt()
+                    val percent = 30 + ((bytesSent.toDouble() / maxOf(1L, fileLength)) * 60).toInt()
                     onProgress(percent, "Streaming: ${bytesSent / 1024} KB / ${fileLength / 1024} KB")
                 }
             }
@@ -306,7 +320,7 @@ class TransferEngine(private val context: Context) {
     private suspend fun executeRelayTransfer(
         backendUrl: String,
         requestId: String,
-        file: File,
+        path: String,
         targetSha256: String,
         onProgress: (percent: Int, status: String) -> Unit
     ): Boolean = withContext(Dispatchers.IO) {
@@ -331,7 +345,12 @@ class TransferEngine(private val context: Context) {
             cipher.init(Cipher.ENCRYPT_MODE, secretKey, gcmSpec)
 
             onProgress(40, "Encrypting payload with hardware-backed AES-256-GCM...")
-            val plaintext = file.readBytes()
+            val inputStream = storageManager.openInputStream(path, targetSha256)
+            if (inputStream == null) {
+                Log.e(TAG, "Failed opening input stream for $path ($targetSha256)")
+                return@withContext false
+            }
+            val plaintext = inputStream.use { it.readBytes() }
             val ciphertext = cipher.doFinal(plaintext)
 
             onProgress(65, "Streaming ciphertext to ephemeral zero-trust relay...")

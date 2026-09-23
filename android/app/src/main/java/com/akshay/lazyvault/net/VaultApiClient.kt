@@ -67,6 +67,7 @@ class VaultApiClient {
                                 put("size", file.size)
                                 put("sha256", file.sha256)
                                 put("mtime", file.mtime)
+                                put("name", if (file.name.isNotEmpty()) file.name else file.path.substringAfterLast('/'))
                             }
                             filesArray.put(fObj)
                         }
@@ -151,6 +152,7 @@ class VaultApiClient {
                         put("size", file.size)
                         put("sha256", file.sha256)
                         put("mtime", file.mtime)
+                        put("name", if (file.name.isNotEmpty()) file.name else file.path.substringAfterLast('/'))
                     }
                     filesArray.put(fObj)
                 }

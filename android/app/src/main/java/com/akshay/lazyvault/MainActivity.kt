@@ -8,11 +8,16 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.Color
+import android.net.Uri
 import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Bundle
+import android.provider.OpenableColumns
+import android.text.Editable
+import android.text.TextWatcher
 import android.text.format.Formatter
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.ViewGroup
 import android.widget.EditText
 import android.widget.ImageView
@@ -23,6 +28,8 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
+import androidx.recyclerview.widget.LinearLayoutManager
+import com.akshay.lazyvault.ui.VaultFilesAdapter
 import androidx.work.Constraints
 import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.NetworkType
@@ -39,6 +46,7 @@ import com.akshay.lazyvault.net.VaultApiClient
 import com.akshay.lazyvault.service.ForegroundDataTransferService
 import com.akshay.lazyvault.service.VaultNotificationManager
 import com.akshay.lazyvault.storage.VaultPreferences
+import com.akshay.lazyvault.storage.VaultStorageManager
 import com.akshay.lazyvault.worker.CatalogIndexWorker
 import com.google.android.material.card.MaterialCardView
 import com.google.firebase.messaging.FirebaseMessaging
@@ -64,9 +72,12 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityMainBinding
     private lateinit var prefs: VaultPreferences
+    private lateinit var storageManager: VaultStorageManager
     private val apiClient = VaultApiClient()
     private val scope = CoroutineScope(Dispatchers.Main + Job())
     private var currentFiles = listOf<CatalogItem>()
+    private var allFiles = listOf<CatalogItem>()
+    private lateinit var filesAdapter: VaultFilesAdapter
 
     // Live poller for pending requests and connected devices
     private var livePollJob: Job? = null
@@ -81,6 +92,18 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+    // System Folder Picker for indexing real folders from phone storage
+    private val pickFolderLauncher =
+        registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri: Uri? ->
+            if (uri != null) {
+                storageManager.setSelectedFolder(uri)
+                val displayName = storageManager.getSelectedFolderDisplayName()
+                binding.contentMain.textCurrentFolder.text = "Folder: $displayName"
+                Toast.makeText(this, "Scanning folder: $displayName...", Toast.LENGTH_SHORT).show()
+                performCatalogIndexing()
+            }
+        }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         binding = ActivityMainBinding.inflate(layoutInflater)
@@ -88,6 +111,7 @@ class MainActivity : AppCompatActivity() {
         setSupportActionBar(binding.toolbar)
 
         prefs = VaultPreferences(this)
+        storageManager = VaultStorageManager(this)
         VaultNotificationManager.createNotificationChannels(this)
 
         // Request POST_NOTIFICATIONS on Android 13+
@@ -165,9 +189,63 @@ class MainActivity : AppCompatActivity() {
             showRegenerateLinkDialog()
         }
 
+        binding.contentMain.textCurrentFolder.text = "Folder: ${storageManager.getSelectedFolderDisplayName()}"
+
+        binding.contentMain.btnPickFolder.setOnClickListener {
+            Toast.makeText(this, "Select any folder or subfolder (Android restricts root Downloads)", Toast.LENGTH_SHORT).show()
+            pickFolderLauncher.launch(null)
+        }
+
+        binding.contentMain.btnResetFolder.setOnClickListener {
+            storageManager.resetToDefaultVault()
+            binding.contentMain.textCurrentFolder.text = "Folder: Default App Vault"
+            Toast.makeText(this, "Reset to default internal vault", Toast.LENGTH_SHORT).show()
+            performCatalogIndexing()
+        }
+
         binding.contentMain.btnSyncCatalog.setOnClickListener {
             performCatalogIndexing()
         }
+
+        filesAdapter = VaultFilesAdapter { item ->
+            val filename = if (item.name.isNotEmpty()) item.name else item.path.substringAfterLast('/')
+            showFileActionsDialog(filename, item.sha256)
+        }
+
+        binding.contentMain.recyclerFilesList.apply {
+            layoutManager = LinearLayoutManager(this@MainActivity)
+            adapter = filesAdapter
+            var downY = 0f
+            setOnTouchListener { v, event ->
+                when (event.actionMasked) {
+                    MotionEvent.ACTION_DOWN -> {
+                        downY = event.y
+                        v.parent.requestDisallowInterceptTouchEvent(true)
+                    }
+                    MotionEvent.ACTION_MOVE -> {
+                        val dy = downY - event.y
+                        val direction = if (dy > 0) 1 else -1
+                        if (v.canScrollVertically(direction)) {
+                            v.parent.requestDisallowInterceptTouchEvent(true)
+                        } else {
+                            v.parent.requestDisallowInterceptTouchEvent(false)
+                        }
+                    }
+                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                        v.parent.requestDisallowInterceptTouchEvent(false)
+                    }
+                }
+                false
+            }
+        }
+
+        binding.contentMain.editFilterFiles.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                filterFiles(s?.toString().orEmpty())
+            }
+            override fun afterTextChanged(s: Editable?) {}
+        })
 
         binding.contentMain.btnSaveBroker.setOnClickListener {
             val newBroker = binding.contentMain.editBackendUrl.text.toString().trim()
@@ -188,49 +266,20 @@ class MainActivity : AppCompatActivity() {
 
     private fun performCatalogIndexing() {
         binding.contentMain.cardIndexingState.visibility = LinearLayout.VISIBLE
-        binding.contentMain.textIndexingStatus.text = "Indexing files & building Merkle root..."
+        binding.contentMain.textIndexingStatus.text = "Indexing vault files & Merkle root..."
 
         scope.launch {
             val (snapshot, files) = withContext(Dispatchers.IO) {
-                val vaultDir = File(filesDir, "vault")
-                if (!vaultDir.exists()) {
-                    vaultDir.mkdirs()
-                    seedInitialVault(vaultDir)
-                }
-
-                val indexed = mutableListOf<CatalogItem>()
-                val merkleDigest = MessageDigest.getInstance("SHA-256")
-
-                vaultDir.walkTopDown().forEach { file ->
-                    if (file.isFile && !file.name.startsWith(".")) {
-                        val sha = calculateFileSha256(file)
-                        val relPath = "/storage/vault/${file.name}"
-                        indexed.add(
-                            CatalogItem(
-                                path = relPath,
-                                size = file.length(),
-                                sha256 = sha,
-                                mtime = file.lastModified()
-                            )
-                        )
-                        merkleDigest.update(sha.toByteArray(Charsets.UTF_8))
+                storageManager.indexCatalog { status ->
+                    scope.launch(Dispatchers.Main) {
+                        binding.contentMain.textIndexingStatus.text = status
                     }
                 }
-
-                val rootMerkle = bytesToHex(merkleDigest.digest())
-                val gen = System.currentTimeMillis()
-                val snap = CatalogSnapshot(
-                    generation = gen,
-                    rootMerkle = rootMerkle,
-                    updatedAt = gen,
-                    deviceId = prefs.deviceId,
-                    files = indexed
-                )
-                Pair(snap, indexed)
             }
 
             currentFiles = files
             renderFileList(files)
+            binding.contentMain.textCurrentFolder.text = "Folder: ${storageManager.getSelectedFolderDisplayName()}"
 
             // Resolve shareable link: query backend network info or detect local IP
             val syncOutcome = withContext(Dispatchers.IO) {
@@ -279,7 +328,7 @@ class MainActivity : AppCompatActivity() {
             binding.contentMain.cardIndexingState.visibility = LinearLayout.GONE
             binding.contentMain.textShareLink.text = shareUrl
             if (isSynced) {
-                Toast.makeText(this@MainActivity, "Vault synced to broker! Ready for access.", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this@MainActivity, "Indexed ${files.size} file(s)! Synced to broker.", Toast.LENGTH_SHORT).show()
             } else {
                 Toast.makeText(this@MainActivity, "Warning: Could not reach broker at ${prefs.backendUrl}. Check Wi-Fi.", Toast.LENGTH_LONG).show()
             }
@@ -287,100 +336,50 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun renderFileList(files: List<CatalogItem>) {
-        val container = binding.contentMain.containerFilesList
-        container.removeAllViews()
+        allFiles = files
+        val totalCount = files.size
+        binding.contentMain.textIndexedFilesTitle.text = "INDEXED FILES ($totalCount)"
 
         if (files.isEmpty()) {
-            val emptyText = TextView(this).apply {
-                text = "No files found in vault storage directory."
-                setTextColor(Color.parseColor("#94A3B8"))
-                textSize = 13f
-                setPadding(0, 16, 0, 16)
+            binding.contentMain.recyclerFilesList.visibility = View.GONE
+            binding.contentMain.textEmptyFiles.visibility = View.VISIBLE
+            binding.contentMain.layoutFilterFiles.visibility = View.GONE
+        } else {
+            binding.contentMain.recyclerFilesList.visibility = View.VISIBLE
+            binding.contentMain.textEmptyFiles.visibility = View.GONE
+            binding.contentMain.layoutFilterFiles.visibility = if (files.size > 5) View.VISIBLE else View.GONE
+
+            val density = resources.displayMetrics.density
+            val heightPx = if (files.size <= 3) {
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            } else {
+                (300 * density).toInt()
             }
-            container.addView(emptyText)
-            return
+            binding.contentMain.recyclerFilesList.layoutParams.height = heightPx
+            binding.contentMain.recyclerFilesList.requestLayout()
+
+            val currentQuery = binding.contentMain.editFilterFiles.text?.toString().orEmpty()
+            filterFiles(currentQuery)
         }
+    }
 
-        for (file in files) {
-            val filename = file.path.substringAfterLast('/')
-            val formattedSize = formatFileSize(file.size)
-            val shortSha = if (file.sha256.length > 12) file.sha256.take(8) + "..." + file.sha256.takeLast(4) else file.sha256
-
-            val card = MaterialCardView(this).apply {
-                layoutParams = LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT
-                ).apply {
-                    bottomMargin = 16
-                }
-                setCardBackgroundColor(Color.parseColor("#0F172A"))
-                radius = 24f
-                strokeWidth = 2
-                strokeColor = Color.parseColor("#1E293B")
-                cardElevation = 0f
+    private fun filterFiles(query: String) {
+        val trimmed = query.trim()
+        val filtered = if (trimmed.isEmpty()) {
+            allFiles
+        } else {
+            allFiles.filter { item ->
+                val name = if (item.name.isNotEmpty()) item.name else item.path.substringAfterLast('/')
+                name.contains(trimmed, ignoreCase = true) || item.sha256.startsWith(trimmed, ignoreCase = true)
             }
+        }
+        filesAdapter.submitList(filtered)
 
-            val cardContent = LinearLayout(this).apply {
-                layoutParams = LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT
-                )
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-                setPadding(24, 20, 24, 20)
-            }
-
-            val fileDetails = LinearLayout(this).apply {
-                layoutParams = LinearLayout.LayoutParams(
-                    0,
-                    ViewGroup.LayoutParams.WRAP_CONTENT,
-                    1f
-                )
-                orientation = LinearLayout.VERTICAL
-            }
-
-            val nameView = TextView(this).apply {
-                text = filename
-                setTextColor(Color.parseColor("#F8FAFC"))
-                textSize = 14f
-                typeface = android.graphics.Typeface.DEFAULT_BOLD
-            }
-
-            val metaView = TextView(this).apply {
-                text = "$formattedSize  •  SHA: $shortSha"
-                setTextColor(Color.parseColor("#64748B"))
-                textSize = 11f
-                typeface = android.graphics.Typeface.MONOSPACE
-            }
-
-            fileDetails.addView(nameView)
-            fileDetails.addView(metaView)
-
-            val menuBtn = TextView(this).apply {
-                text = "⋮"
-                setTextColor(Color.parseColor("#38BDF8"))
-                textSize = 24f
-                gravity = Gravity.CENTER
-                setPadding(24, 0, 12, 0)
-                setOnClickListener {
-                    showFileActionsDialog(filename, file.sha256)
-                }
-            }
-
-            cardContent.addView(fileDetails)
-            cardContent.addView(menuBtn)
-            card.addView(cardContent)
-
-            card.setOnLongClickListener {
-                showFileActionsDialog(filename, file.sha256)
-                true
-            }
-
-            card.setOnClickListener {
-                showFileActionsDialog(filename, file.sha256)
-            }
-
-            container.addView(card)
+        val totalCount = allFiles.size
+        if (trimmed.isEmpty()) {
+            binding.contentMain.textIndexedFilesTitle.text = "INDEXED FILES ($totalCount)"
+        } else {
+            binding.contentMain.textIndexedFilesTitle.text = "INDEXED FILES (${filtered.size}/$totalCount)"
         }
     }
 
@@ -877,37 +876,5 @@ class MainActivity : AppCompatActivity() {
             // Ignore
         }
         return null
-    }
-
-    private fun seedInitialVault(vaultDir: File) {
-        File(vaultDir, "financial_report_2026.pdf").writeText(
-            "%PDF-1.7\nLazyVault Confidential Financial Audit Report 2026\nZero-Trust Dormant Edge Node\n"
-        )
-        File(vaultDir, "infra_secrets_backup.kdbx").writeText(
-            "KDBX-V4-ENCRYPTED-HEADER-SAMPLE-SECRET-KEYSTORE\n"
-        )
-        File(vaultDir, "release_artifacts_v2.0.tar.gz").writeText(
-            "GZIP-COMPRESSED-TAR-RELEASE-ARTIFACT-V2.0\n"
-        )
-    }
-
-    private fun calculateFileSha256(file: File): String {
-        val digest = MessageDigest.getInstance("SHA-256")
-        val buffer = ByteArray(64 * 1024)
-        FileInputStream(file).use { fis ->
-            var read: Int
-            while (fis.read(buffer).also { read = it } != -1) {
-                digest.update(buffer, 0, read)
-            }
-        }
-        return bytesToHex(digest.digest())
-    }
-
-    private fun bytesToHex(bytes: ByteArray): String {
-        val sb = StringBuilder()
-        for (b in bytes) {
-            sb.append(String.format("%02x", b))
-        }
-        return sb.toString()
     }
 }

@@ -4,7 +4,8 @@ data class CatalogItem(
     val path: String,
     val size: Long,
     val sha256: String,
-    val mtime: Long
+    val mtime: Long,
+    val name: String = ""
 )
 
 data class CatalogSnapshot(
