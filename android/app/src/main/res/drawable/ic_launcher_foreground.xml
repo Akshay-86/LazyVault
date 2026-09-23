@@ -1,0 +1,42 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Hexagonal Vault Safe Contour -->
+    <path
+        android:strokeColor="#38BDF8"
+        android:strokeWidth="3"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:fillColor="#200284C7"
+        android:pathData="M54,20 L82,34 L82,68 L54,88 L26,68 L26,34 Z" />
+
+    <!-- Inner Contour -->
+    <path
+        android:strokeColor="#0284C7"
+        android:strokeWidth="1.5"
+        android:fillColor="#00000000"
+        android:pathData="M54,28 L74,38 L74,64 L54,80 L34,64 L34,38 Z" />
+
+    <!-- Lock Shackle -->
+    <path
+        android:strokeColor="#38BDF8"
+        android:strokeWidth="3.5"
+        android:strokeLineCap="round"
+        android:fillColor="#00000000"
+        android:pathData="M44,48 V40 A10,10 0 0,1 64,40 V48" />
+
+    <!-- Lock Body -->
+    <path
+        android:fillColor="#0284C7"
+        android:strokeColor="#38BDF8"
+        android:strokeWidth="1.5"
+        android:pathData="M39,48 H69 A3,3 0 0,1 72,51 V68 A3,3 0 0,1 69,71 H39 A3,3 0 0,1 36,68 V51 A3,3 0 0,1 39,48 Z" />
+
+    <!-- Glowing Keyhole -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M54,54 A3,3 0 1,0 54,60 L56,66 H52 L54,60 Z" />
+</vector>

@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "689295982006",
+    "project_id": "lazyvault-node",
+    "storage_bucket": "lazyvault-node.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:689295982006:android:fc5d446991203f5416d517",
+        "android_client_info": {
+          "package_name": "com.akshay.lazyvault"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAqsJlmsri10_ahuomMJhUwTziOBvv91uw"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

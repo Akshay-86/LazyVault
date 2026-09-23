@@ -1,0 +1,26 @@
+{
+  "name": "lazyvault-monorepo",
+  "version": "1.0.0",
+  "private": true,
+  "description": "LazyVault: On-Demand, Lazy-Evaluated Storage Node Monorepo",
+  "scripts": {
+    "dev:backend": "npm run dev --prefix backend",
+    "dev:web": "npm run dev --prefix web",
+    "build:backend": "npm run build --prefix backend",
+    "build:web": "npm run build --prefix web",
+    "build:android": "./gradlew assembleDebug",
+    "build:all": "npm run build:backend && npm run build:web && npm run build:android",
+    "test:backend": "npm run test --prefix backend",
+    "test:e2e": "python3 scripts/e2e_test.py"
+  },
+  "keywords": [
+    "zero-trust",
+    "lazy-evaluation",
+    "webrtc",
+    "fcm",
+    "android",
+    "ephemeral-relay"
+  ],
+  "author": "LazyVault Team",
+  "license": "Apache-2.0"
+}

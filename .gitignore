@@ -1,0 +1,75 @@
+# ==============================================================================
+# LazyVault Monorepo .gitignore
+# Covers Android (Gradle/Kotlin), Node.js (Broker/Web), Python CLI, & Secrets
+# ==============================================================================
+
+# --- Android & Gradle ---
+*.apk
+*.aab
+*.ap_
+output-metadata.json
+build/
+**/build/
+android/app/build/
+.gradle/
+**/.gradle/
+.kotlin/
+**/.kotlin/
+*.iml
+.idea/
+!.idea/codeStyles/
+local.properties
+captures/
+.externalNativeBuild/
+.cxx/
+
+# --- Node.js & Web Frontend ---
+node_modules/
+**/node_modules/
+dist/
+**/dist/
+.vite/
+**/.vite/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# --- Backend Ephemeral & Runtime Storage ---
+# CRITICAL: Never commit ephemeral client payloads or runtime caches
+ephemeral_relay/
+backend/ephemeral_relay/
+backend/data/
+*.enc
+
+# --- Python & CLI ---
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+env/
+
+# --- Secrets, Credentials, & Private Keys (NEVER COMMIT) ---
+.env
+.env.*
+!.env.example
+serviceAccountKey.json
+backend/serviceAccountKey.json
+*.keystore
+*.jks
+*.p8
+*.p12
+*.pem
+*.key
+
+# --- Operating System & IDE Artifacts ---
+.DS_Store
+Thumbs.db
+*.swp
+*~
+*.log
