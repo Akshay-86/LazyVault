@@ -104,19 +104,17 @@ class TransferActionReceiver : BroadcastReceiver() {
                     }
                 }
 
-                // Android 14+ (API 34+): Enqueue User-Initiated Data Transfer (UIDT) Job via JobScheduler
-                // Android 13 and below: Start Foreground Service
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                    try {
-                        Log.d(TAG, "Scheduling UserInitiatedDataTransfer (UIDT) via JobScheduler (API 34+)")
-                        scheduleUserInitiatedJob(context, requestId, path, sha256, transports)
-                    } catch (e: Exception) {
-                        Log.w(TAG, "UIDT scheduling failed, falling back to ForegroundService: ${e.message}")
-                        startForegroundService(context, requestId, path, sha256, transports)
-                    }
-                } else {
-                    Log.d(TAG, "Starting ForegroundDataTransferService fallback (API < 34)")
+                // Directly launch ForegroundDataTransferService with WakeLock
+                try {
+                    Log.d(TAG, "Starting ForegroundDataTransferService for $requestId")
                     startForegroundService(context, requestId, path, sha256, transports)
+                } catch (e: Exception) {
+                    Log.w(TAG, "ForegroundService start failed, falling back to UIDT JobScheduler: ${e.message}")
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                        try {
+                            scheduleUserInitiatedJob(context, requestId, path, sha256, transports)
+                        } catch (ignored: Exception) {}
+                    }
                 }
             }
         }

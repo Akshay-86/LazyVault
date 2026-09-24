@@ -77,8 +77,17 @@ export const TransferModal: React.FC<TransferModalProps> = ({ file, backendUrl, 
             totalSize: file.size,
             onProgress: (p) => {
               if (isMounted) {
-                setStatus('TRANSFERRING');
                 setTransferProgress(p);
+                // Do NOT set status to TRANSFERRING while waiting for device approval!
+                setStatus((prev) => {
+                  if (prev === 'WAITING_FOR_APPROVAL') {
+                    return p.bytesReceived > 0 ? 'TRANSFERRING' : 'WAITING_FOR_APPROVAL';
+                  }
+                  if (['COMPLETED', 'REJECTED', 'EXPIRED', 'FAILED'].includes(prev)) {
+                    return prev;
+                  }
+                  return 'TRANSFERRING';
+                });
               }
             },
             onComplete: (_blob, sha) => {
@@ -105,6 +114,13 @@ export const TransferModal: React.FC<TransferModalProps> = ({ file, backendUrl, 
               if (data.status) {
                 if (data.status === 'APPROVED') {
                   setStatus('TRANSFERRING');
+                  setTransferProgress((prev) => prev || {
+                    bytesReceived: 0,
+                    totalBytes: file.size,
+                    progressPercent: 5,
+                    speedMbps: 0,
+                    statusText: 'Transfer approved on phone! Establishing direct P2P stream...',
+                  });
                 } else if (data.status === 'REJECTED') {
                   setStatus('REJECTED');
                   setErrorMessage('Transfer was denied on the Android device.');
@@ -113,29 +129,18 @@ export const TransferModal: React.FC<TransferModalProps> = ({ file, backendUrl, 
                   setStatus('COMPLETED');
                   setIsIntegrityVerified(true);
                   setVerifiedSha256(data.sha256 || file.sha256);
+                } else if (data.status === 'EXPIRED') {
+                  setStatus('EXPIRED');
+                  setErrorMessage('Transfer request expired (60s limit reached before approval).');
+                  receiver.close();
+                } else if (data.status === 'FAILED') {
+                  setStatus('FAILED');
+                  setErrorMessage(data.error || 'Transfer failed on device.');
+                  receiver.close();
                 }
               }
             }
           });
-
-          // Countdown timer
-          countdownIntervalRef.current = setInterval(() => {
-            setTimeRemainingSec((prev) => {
-              if (prev <= 1) {
-                clearInterval(countdownIntervalRef.current);
-                setStatus('EXPIRED');
-                setErrorMessage('Request timed out after 60 seconds.');
-                if (vaultId) {
-                  updateDoc(doc(db, 'vaults', vaultId, 'requests', generatedReqId), {
-                    status: 'EXPIRED',
-                    updatedAt: Date.now(),
-                  }).catch(console.warn);
-                }
-                return 0;
-              }
-              return prev - 1;
-            });
-          }, 1000);
 
           return () => {
             unsub();
@@ -205,20 +210,34 @@ export const TransferModal: React.FC<TransferModalProps> = ({ file, backendUrl, 
         setTimeRemainingSec((prev) => {
           if (prev <= 1) {
             clearInterval(countdownIntervalRef.current!);
+            countdownIntervalRef.current = null;
             setStatus('EXPIRED');
+            setErrorMessage('Transfer request timed out after 60 seconds.');
+            if (vaultId && requestId) {
+              updateDoc(doc(db, 'vaults', vaultId, 'requests', requestId), {
+                status: 'EXPIRED',
+                updatedAt: Date.now(),
+              }).catch(console.warn);
+            }
             return 0;
           }
           return prev - 1;
         });
       }, 1000);
     } else {
-      if (countdownIntervalRef.current) clearInterval(countdownIntervalRef.current);
+      if (countdownIntervalRef.current) {
+        clearInterval(countdownIntervalRef.current);
+        countdownIntervalRef.current = null;
+      }
     }
 
     return () => {
-      if (countdownIntervalRef.current) clearInterval(countdownIntervalRef.current);
+      if (countdownIntervalRef.current) {
+        clearInterval(countdownIntervalRef.current);
+        countdownIntervalRef.current = null;
+      }
     };
-  }, [status]);
+  }, [status, vaultId, requestId]);
 
   // 3. Status Polling / SSE Handler (Legacy REST mode only)
   useEffect(() => {

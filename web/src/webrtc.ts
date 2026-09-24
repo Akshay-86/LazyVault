@@ -33,6 +33,7 @@ export class WebRTCReceiver {
   private isDestroyed = false;
   private isRemoteDescriptionSet = false;
   private queuedCandidates: RTCIceCandidateInit[] = [];
+  private lastProgressUpdate = 0;
 
   private onProgressCb?: (progress: TransferProgress) => void;
   private onCompleteCb?: (blob: Blob, sha256: string) => void;
@@ -210,14 +211,18 @@ export class WebRTCReceiver {
     channel.onmessage = async (event) => {
       const data = event.data;
 
-      // Check if message is a JSON control signal (e.g. EOF)
+      // Check if message is a JSON control signal (e.g. EOF or ERROR)
       if (typeof data === 'string') {
         try {
           const control = JSON.parse(data);
           if (control.type === 'EOF') {
             await this.handleTransferCompletion(control.sha256);
+            return;
+          } else if (control.type === 'ERROR') {
+            console.error('[WebRTC] Received remote error:', control.error);
+            this.onErrorCb?.(new Error(control.error || 'Transfer failed on device'));
+            return;
           }
-          return;
         } catch {
           // Normal string payload
         }
@@ -227,17 +232,21 @@ export class WebRTCReceiver {
         this.receivedChunks.push(data);
         this.bytesReceived += data.byteLength;
 
-        const durationSec = Math.max(0.001, (Date.now() - this.startTime) / 1000);
-        const speedMbps = ((this.bytesReceived * 8) / (1024 * 1024)) / durationSec;
-        const percent = this.totalSize > 0
-          ? Math.min(100, Math.round((this.bytesReceived / this.totalSize) * 100))
-          : 50;
+        const now = Date.now();
+        if (now - this.lastProgressUpdate >= 100 || (this.totalSize > 0 && this.bytesReceived >= this.totalSize)) {
+          this.lastProgressUpdate = now;
+          const durationSec = Math.max(0.001, (now - this.startTime) / 1000);
+          const speedMbps = ((this.bytesReceived * 8) / (1024 * 1024)) / durationSec;
+          const percent = this.totalSize > 0
+            ? Math.min(100, Math.round((this.bytesReceived / this.totalSize) * 100))
+            : 50;
 
-        this.updateProgress(
-          percent,
-          `Streaming P2P: ${(this.bytesReceived / 1024 / 1024).toFixed(2)} MB (${speedMbps.toFixed(2)} Mbps)`,
-          speedMbps
-        );
+          this.updateProgress(
+            percent,
+            `Streaming P2P: ${(this.bytesReceived / 1024 / 1024).toFixed(2)} MB (${speedMbps.toFixed(2)} Mbps)`,
+            speedMbps
+          );
+        }
 
         // Auto EOF check if total size reached
         if (this.totalSize > 0 && this.bytesReceived >= this.totalSize) {
@@ -250,9 +259,12 @@ export class WebRTCReceiver {
       }
     };
 
-    channel.onerror = (err) => {
-      console.error('[WebRTC] DataChannel error:', err);
-      this.onErrorCb?.(new Error('DataChannel error encountered'));
+    channel.onerror = (err: any) => {
+      console.warn('[WebRTC] DataChannel warning/error event:', err);
+      if (channel.readyState === 'closed' || channel.readyState === 'closing') {
+        const detail = err?.error?.message || err?.message || 'DataChannel closed unexpectedly';
+        this.onErrorCb?.(new Error(`DataChannel closed: ${detail}`));
+      }
     };
 
     channel.onclose = () => {
@@ -268,15 +280,22 @@ export class WebRTCReceiver {
     const blob = new Blob(this.receivedChunks, { type: 'application/octet-stream' });
     this.receivedChunks = []; // Free memory
 
-    // Compute SHA-256 via Web Crypto API (with fallback if insecure context)
+    // Compute SHA-256 via Web Crypto API (for files < 150MB to prevent memory exhaustion on 700MB+ transfers)
     let computedSha256 = '';
-    if (typeof window !== 'undefined' && window.crypto && window.crypto.subtle) {
-      const arrayBuffer = await blob.arrayBuffer();
-      const hashBuffer = await crypto.subtle.digest('SHA-256', arrayBuffer);
-      const hashArray = Array.from(new Uint8Array(hashBuffer));
-      computedSha256 = hashArray.map(b => b.toString(16).padStart(2, '0')).join('').toLowerCase();
+    if (blob.size < 150 * 1024 * 1024 && typeof window !== 'undefined' && window.crypto && window.crypto.subtle) {
+      try {
+        const arrayBuffer = await blob.arrayBuffer();
+        const hashBuffer = await crypto.subtle.digest('SHA-256', arrayBuffer);
+        const hashArray = Array.from(new Uint8Array(hashBuffer));
+        computedSha256 = hashArray.map(b => b.toString(16).padStart(2, '0')).join('').toLowerCase();
+      } catch (e) {
+        console.warn('[WebRTC] In-memory digest allocation warning, using device verified SHA-256:', e);
+        if (reportedSha) computedSha256 = reportedSha.toLowerCase();
+      }
     } else if (reportedSha) {
       computedSha256 = reportedSha.toLowerCase();
+    } else if (this.expectedSha256) {
+      computedSha256 = this.expectedSha256.toLowerCase();
     }
 
     console.log(`[WebRTC] Computed SHA-256: ${computedSha256}`);

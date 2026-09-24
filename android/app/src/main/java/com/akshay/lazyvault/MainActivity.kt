@@ -3,6 +3,7 @@ package com.akshay.lazyvault
 import android.Manifest
 import android.content.ClipData
 import android.content.ClipboardManager
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -76,6 +77,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var prefs: VaultPreferences
     private lateinit var storageManager: VaultStorageManager
     private lateinit var firebaseVaultManager: FirebaseVaultManager
+    private val TAG = "MainActivity"
     private val apiClient = VaultApiClient()
     private val scope = CoroutineScope(Dispatchers.Main + Job())
     private var currentFiles = listOf<CatalogItem>()
@@ -117,6 +119,9 @@ class MainActivity : AppCompatActivity() {
         storageManager = VaultStorageManager(this)
         firebaseVaultManager = FirebaseVaultManager(this)
         VaultNotificationManager.createNotificationChannels(this)
+        try {
+            (getSystemService(Context.JOB_SCHEDULER_SERVICE) as? android.app.job.JobScheduler)?.cancelAll()
+        } catch (ignored: Exception) {}
 
         // Request POST_NOTIFICATIONS on Android 13+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -147,8 +152,11 @@ class MainActivity : AppCompatActivity() {
         super.onResume()
         refreshAuditLog()
         startLivePolling()
-        firebaseVaultManager.startListeningForRequests { _, _, _ ->
-            refreshAuditLog()
+        firebaseVaultManager.startListeningForRequests { request ->
+            runOnUiThread {
+                handlePendingRequests(listOf(request))
+                refreshAuditLog()
+            }
         }
         firebaseVaultManager.startListeningForClients { clients ->
             runOnUiThread {
@@ -706,13 +714,20 @@ class MainActivity : AppCompatActivity() {
         )
         refreshAuditLog()
 
+        firebaseVaultManager.updateRequestStatus(request.requestId, status = "REJECTED", decision = "DENY")
+
         scope.launch(Dispatchers.IO) {
-            apiClient.sendDecision(
-                backendUrl = prefs.backendUrl,
-                requestId = request.requestId,
-                decision = "DENY",
-                reason = "User tapped DENY on mobile node"
-            )
+            val broker = prefs.backendUrl
+            if (broker.isNotEmpty() && !broker.contains("192.168.10.15")) {
+                try {
+                    apiClient.sendDecision(
+                        backendUrl = broker,
+                        requestId = request.requestId,
+                        decision = "DENY",
+                        reason = "User tapped DENY on mobile node"
+                    )
+                } catch (ignored: Exception) {}
+            }
         }
         Toast.makeText(this, "Transfer request DENIED", Toast.LENGTH_SHORT).show()
     }
@@ -736,13 +751,20 @@ class MainActivity : AppCompatActivity() {
         )
         refreshAuditLog()
 
+        firebaseVaultManager.updateRequestStatus(request.requestId, status = "APPROVED", decision = "ALLOW")
+
         scope.launch(Dispatchers.IO) {
-            apiClient.sendDecision(
-                backendUrl = prefs.backendUrl,
-                requestId = request.requestId,
-                decision = "ALLOW",
-                selectedTransport = selectedTransport
-            )
+            val broker = prefs.backendUrl
+            if (broker.isNotEmpty() && !broker.contains("192.168.10.15")) {
+                try {
+                    apiClient.sendDecision(
+                        backendUrl = broker,
+                        requestId = request.requestId,
+                        decision = "ALLOW",
+                        selectedTransport = selectedTransport
+                    )
+                } catch (ignored: Exception) {}
+            }
         }
 
         val serviceIntent = Intent(this, ForegroundDataTransferService::class.java).apply {
@@ -751,7 +773,29 @@ class MainActivity : AppCompatActivity() {
             putExtra("sha256", request.sha256)
             putStringArrayListExtra("supported_transports", ArrayList(request.supportedTransports))
         }
-        ContextCompat.startForegroundService(this, serviceIntent)
+        try {
+            ContextCompat.startForegroundService(this, serviceIntent)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to start ForegroundDataTransferService directly, trying UIDT Job fallback", e)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                try {
+                    val jobScheduler = getSystemService(Context.JOB_SCHEDULER_SERVICE) as android.app.job.JobScheduler
+                    val componentName = ComponentName(this, com.akshay.lazyvault.service.DataTransferJobService::class.java)
+                    val extras = android.os.PersistableBundle().apply {
+                        putString("request_id", request.requestId)
+                        putString("path", request.path)
+                        putString("sha256", request.sha256)
+                        putString("transports", request.supportedTransports.joinToString(","))
+                    }
+                    val jobId = (request.requestId.hashCode() and 0x7FFFFFFF)
+                    val builder = android.app.job.JobInfo.Builder(jobId, componentName)
+                        .setRequiredNetworkType(android.app.job.JobInfo.NETWORK_TYPE_ANY)
+                        .setExtras(extras)
+                        .setUserInitiated(true)
+                    jobScheduler.schedule(builder.build())
+                } catch (ignored: Exception) {}
+            }
+        }
         Toast.makeText(this, "Transfer ALLOWED! Streaming ${request.path.substringAfterLast('/')}...", Toast.LENGTH_SHORT).show()
     }
 

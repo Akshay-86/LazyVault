@@ -32,7 +32,7 @@ class TransferEngine(private val context: Context) {
     private val scope = CoroutineScope(Dispatchers.IO)
 
     companion object {
-        const val CHUNK_SIZE = 64 * 1024 // 64KB chunks
+        const val CHUNK_SIZE = 32 * 1024 // 32KB chunks for optimal WebRTC SCTP throughput and cellular reliability
         const val BUFFERED_AMOUNT_LOW_THRESHOLD = 512 * 1024L // 512KB backpressure threshold
     }
 
@@ -55,6 +55,13 @@ class TransferEngine(private val context: Context) {
         if (testStream == null) {
             Log.e(TAG, "File cannot be opened or does not exist: $path ($targetSha256)")
             onProgress(0, "Error: File not found on device storage")
+            try {
+                FirebaseVaultManager(context).updateRequestStatus(
+                    requestId,
+                    status = "FAILED",
+                    error = "File not found on device storage (${path.substringAfterLast('/')})"
+                )
+            } catch (ignored: Exception) {}
             return@withContext false
         }
         try {
@@ -347,6 +354,21 @@ class TransferEngine(private val context: Context) {
             val fileLength = storageManager.getFileSize(path, targetSha256)
             val inputStream = storageManager.openInputStream(path, targetSha256) ?: run {
                 Log.e(TAG, "Failed to open input stream for $path ($targetSha256)")
+                try {
+                    val errJson = JSONObject().apply {
+                        put("type", "ERROR")
+                        put("error", "File not found on device storage: ${path.substringAfterLast('/')}")
+                    }
+                    val errBuffer = DataChannel.Buffer(ByteBuffer.wrap(errJson.toString().toByteArray(Charsets.UTF_8)), false)
+                    dc.send(errBuffer)
+                    delay(500)
+                } catch (ignored: Exception) {}
+                firebaseVaultManager.updateRequestStatus(
+                    requestId,
+                    status = "FAILED",
+                    error = "File not found on device storage (${path.substringAfterLast('/')})"
+                )
+                onProgress(0, "Error: File not found on device storage")
                 callerCandSub?.remove()
                 peerConnection.close()
                 factory.dispose()
@@ -355,24 +377,42 @@ class TransferEngine(private val context: Context) {
 
             var bytesSent = 0L
             val buffer = ByteArray(CHUNK_SIZE)
+            var lastProgressTime = 0L
+            var lastPercent = -1
 
             inputStream.use { fis ->
                 var read: Int
                 while (fis.read(buffer).also { read = it } != -1) {
+                    if (dc.state() != DataChannel.State.OPEN) {
+                        Log.e(TAG, "WebRTC DataChannel closed prematurely during streaming")
+                        break
+                    }
+
                     val chunkBytes = if (read == CHUNK_SIZE) buffer else buffer.copyOf(read)
                     val byteBuffer = ByteBuffer.wrap(chunkBytes)
                     val dataBuffer = DataChannel.Buffer(byteBuffer, true) // binary
 
                     // Backpressure check: wait if bufferedAmount exceeds threshold
                     while (dc.bufferedAmount() > BUFFERED_AMOUNT_LOW_THRESHOLD) {
-                        delay(10)
+                        delay(5)
                     }
 
-                    dc.send(dataBuffer)
+                    // Retry sending until accepted by DataChannel buffer
+                    while (!dc.send(dataBuffer)) {
+                        if (dc.state() != DataChannel.State.OPEN) break
+                        delay(10)
+                    }
                     bytesSent += read
 
+                    val now = System.currentTimeMillis()
                     val percent = 30 + ((bytesSent.toDouble() / maxOf(1L, fileLength)) * 60).toInt()
-                    onProgress(percent, "Streaming: ${bytesSent / 1024} KB / ${fileLength / 1024} KB")
+                    if (now - lastProgressTime >= 250L || percent != lastPercent) {
+                        lastProgressTime = now
+                        lastPercent = percent
+                        val sentMb = (bytesSent / (1024 * 1024)).toInt()
+                        val totalMb = (fileLength / (1024 * 1024)).toInt()
+                        onProgress(percent, "Streaming P2P: $sentMb MB / $totalMb MB")
+                    }
                 }
             }
 

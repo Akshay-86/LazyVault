@@ -87,7 +87,7 @@ class FirebaseVaultManager(private val context: Context) {
         }
     }
 
-    fun startListeningForRequests(onRequestReceived: (requestId: String, path: String, sha256: String) -> Unit) {
+    fun startListeningForRequests(onRequestReceived: (com.akshay.lazyvault.data.TransferRequest) -> Unit) {
         val vaultId = prefs.vaultId
         requestListener?.remove()
 
@@ -137,7 +137,7 @@ class FirebaseVaultManager(private val context: Context) {
                             request = req
                         )
 
-                        onRequestReceived(reqId, path, sha256)
+                        onRequestReceived(req)
                     }
                 }
             }
@@ -191,13 +191,14 @@ class FirebaseVaultManager(private val context: Context) {
         clientsListener = null
     }
 
-    fun updateRequestStatus(requestId: String, status: String, decision: String? = null) {
+    fun updateRequestStatus(requestId: String, status: String, decision: String? = null, error: String? = null) {
         val vaultId = prefs.vaultId
         val updateMap = mutableMapOf<String, Any>(
             "status" to status,
             "updatedAt" to System.currentTimeMillis()
         )
         if (decision != null) updateMap["decision"] = decision
+        if (error != null) updateMap["error"] = error
 
         firestore.collection("vaults").document(vaultId)
             .collection("requests").document(requestId)

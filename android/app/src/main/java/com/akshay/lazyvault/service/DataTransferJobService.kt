@@ -68,7 +68,7 @@ class DataTransferJobService : JobService() {
 
             Log.d(TAG, "UIDT Job completed for $requestId. Success: $success")
             notificationManager.cancel(VaultNotificationManager.NOTIFICATION_ID_PROGRESS)
-            jobFinished(params, !success)
+            jobFinished(params, false)
         }
 
         return true
@@ -79,6 +79,6 @@ class DataTransferJobService : JobService() {
         transferJob?.cancel()
         val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         notificationManager.cancel(VaultNotificationManager.NOTIFICATION_ID_PROGRESS)
-        return true
+        return false // Do NOT reschedule zombie transfers!
     }
 }
