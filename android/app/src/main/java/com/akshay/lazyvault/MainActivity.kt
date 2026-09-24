@@ -12,6 +12,7 @@ import android.net.Uri
 import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Bundle
+import android.util.Log
 import android.provider.OpenableColumns
 import android.text.Editable
 import android.text.TextWatcher
@@ -42,6 +43,7 @@ import com.akshay.lazyvault.data.CatalogSnapshot
 import com.akshay.lazyvault.data.ConnectedClient
 import com.akshay.lazyvault.data.TransferRequest
 import com.akshay.lazyvault.databinding.ActivityMainBinding
+import com.akshay.lazyvault.net.FirebaseVaultManager
 import com.akshay.lazyvault.net.VaultApiClient
 import com.akshay.lazyvault.service.ForegroundDataTransferService
 import com.akshay.lazyvault.service.VaultNotificationManager
@@ -73,6 +75,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var binding: ActivityMainBinding
     private lateinit var prefs: VaultPreferences
     private lateinit var storageManager: VaultStorageManager
+    private lateinit var firebaseVaultManager: FirebaseVaultManager
     private val apiClient = VaultApiClient()
     private val scope = CoroutineScope(Dispatchers.Main + Job())
     private var currentFiles = listOf<CatalogItem>()
@@ -112,6 +115,7 @@ class MainActivity : AppCompatActivity() {
 
         prefs = VaultPreferences(this)
         storageManager = VaultStorageManager(this)
+        firebaseVaultManager = FirebaseVaultManager(this)
         VaultNotificationManager.createNotificationChannels(this)
 
         // Request POST_NOTIFICATIONS on Android 13+
@@ -124,18 +128,39 @@ class MainActivity : AppCompatActivity() {
         setupUi()
         schedulePeriodicBackgroundIndexing()
         fetchAndRegisterFcmToken()
-        performCatalogIndexing()
+
+        // Load cached catalog instantly with 0 CPU overhead; only index if first run
+        val cached = storageManager.getCachedCatalog()
+        if (cached != null && cached.isNotEmpty()) {
+            currentFiles = cached
+            renderFileList(cached)
+            binding.contentMain.textCurrentFolder.text = "Folder: ${storageManager.getSelectedFolderDisplayName()}"
+            binding.contentMain.cardIndexingState.visibility = LinearLayout.GONE
+            val cloudLink = prefs.shareableUrl ?: "https://lazyvault-node.web.app/v/${prefs.vaultId}"
+            binding.contentMain.textShareLink.text = cloudLink
+        } else {
+            performCatalogIndexing()
+        }
     }
 
     override fun onResume() {
         super.onResume()
         refreshAuditLog()
         startLivePolling()
+        firebaseVaultManager.startListeningForRequests { _, _, _ ->
+            refreshAuditLog()
+        }
     }
 
     override fun onPause() {
         super.onPause()
         livePollJob?.cancel()
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        livePollJob?.cancel()
+        firebaseVaultManager.stopListening()
     }
 
     private fun setupUi() {
@@ -281,56 +306,38 @@ class MainActivity : AppCompatActivity() {
             renderFileList(files)
             binding.contentMain.textCurrentFolder.text = "Folder: ${storageManager.getSelectedFolderDisplayName()}"
 
-            // Resolve shareable link: query backend network info or detect local IP
+            // Resolve shareable link: use permanent Firebase Hosting URL
             val syncOutcome = withContext(Dispatchers.IO) {
-                var hostAddress = getDeviceLocalIp() ?: "localhost"
-                try {
-                    val netInfo = apiClient.fetchNetworkInfo(prefs.backendUrl)
-                    if (netInfo != null) {
-                        val lanIp = netInfo.optString("lanIp")
-                        val publicIp = netInfo.optString("publicIp")
-                        if (lanIp.isNotEmpty()) hostAddress = lanIp
-                        else if (publicIp.isNotEmpty()) hostAddress = publicIp
-                    }
+                val cloudLink = "https://lazyvault-node.web.app/v/${prefs.vaultId}"
+                prefs.shareableUrl = cloudLink
+
+                // 1. Sync directly to Cloud Firestore (Serverless)
+                val firestoreSynced = firebaseVaultManager.syncVaultToFirestore(snapshot, files)
+
+                // 2. Also sync to local/custom broker if reachable
+                val syncResult = try {
+                    apiClient.syncVaultLink(
+                        backendUrl = prefs.backendUrl,
+                        vaultId = prefs.vaultId,
+                        deviceId = prefs.deviceId,
+                        password = prefs.vaultPassword,
+                        expiresInSeconds = prefs.vaultExpirationSeconds,
+                        snapshot = snapshot
+                    )
                 } catch (e: Exception) {
-                    // Fallback to backend URL host
+                    null
                 }
 
-                // If broker backend URL is customized, use its host/port
-                val brokerUri = android.net.Uri.parse(prefs.backendUrl)
-                val host = if (brokerUri.host != null && brokerUri.host != "10.0.2.2") {
-                    if (brokerUri.port != -1 && brokerUri.port != 80 && brokerUri.port != 443) {
-                        "${brokerUri.scheme}://${brokerUri.host}:${brokerUri.port}"
-                    } else {
-                        "${brokerUri.scheme}://${brokerUri.host}"
-                    }
-                } else {
-                    "http://$hostAddress:4000"
-                }
-
-                val link = "$host/v/${prefs.vaultId}"
-                prefs.shareableUrl = link
-
-                // Sync vault metadata & snapshot to broker
-                val syncResult = apiClient.syncVaultLink(
-                    backendUrl = prefs.backendUrl,
-                    vaultId = prefs.vaultId,
-                    deviceId = prefs.deviceId,
-                    password = prefs.vaultPassword,
-                    expiresInSeconds = prefs.vaultExpirationSeconds,
-                    snapshot = snapshot
-                )
-
-                Pair(link, syncResult != null)
+                Pair(cloudLink, firestoreSynced || syncResult != null)
             }
 
             val (shareUrl, isSynced) = syncOutcome
             binding.contentMain.cardIndexingState.visibility = LinearLayout.GONE
             binding.contentMain.textShareLink.text = shareUrl
             if (isSynced) {
-                Toast.makeText(this@MainActivity, "Indexed ${files.size} file(s)! Synced to broker.", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this@MainActivity, "Indexed ${files.size} file(s)! Synced to Cloud Firestore.", Toast.LENGTH_SHORT).show()
             } else {
-                Toast.makeText(this@MainActivity, "Warning: Could not reach broker at ${prefs.backendUrl}. Check Wi-Fi.", Toast.LENGTH_LONG).show()
+                Toast.makeText(this@MainActivity, "Warning: Could not sync to cloud. Check internet connection.", Toast.LENGTH_LONG).show()
             }
         }
     }
@@ -501,15 +508,23 @@ class MainActivity : AppCompatActivity() {
                     prefs.vaultPassword = newPass
                     binding.contentMain.textCurrentPassword.text = newPass
                     scope.launch(Dispatchers.IO) {
-                        apiClient.syncVaultLink(
-                            backendUrl = prefs.backendUrl,
-                            vaultId = prefs.vaultId,
-                            deviceId = prefs.deviceId,
+                        FirebaseVaultManager(this@MainActivity).syncVaultSecurity(
                             password = newPass,
                             expiresInSeconds = prefs.vaultExpirationSeconds
                         )
+                        if (prefs.backendUrl.isNotEmpty()) {
+                            try {
+                                apiClient.syncVaultLink(
+                                    backendUrl = prefs.backendUrl,
+                                    vaultId = prefs.vaultId,
+                                    deviceId = prefs.deviceId,
+                                    password = newPass,
+                                    expiresInSeconds = prefs.vaultExpirationSeconds
+                                )
+                            } catch (ignored: Exception) {}
+                        }
                     }
-                    Toast.makeText(this, "Passcode updated & synced!", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this, "Passcode updated & synced to Cloud!", Toast.LENGTH_SHORT).show()
                 }
             }
             .setNegativeButton("Cancel", null)
@@ -529,13 +544,21 @@ class MainActivity : AppCompatActivity() {
                 binding.contentMain.btnSelectExpiration.text = formatExpiryButton(selectedSeconds)
 
                 scope.launch(Dispatchers.IO) {
-                    apiClient.syncVaultLink(
-                        backendUrl = prefs.backendUrl,
-                        vaultId = prefs.vaultId,
-                        deviceId = prefs.deviceId,
+                    FirebaseVaultManager(this@MainActivity).syncVaultSecurity(
                         password = prefs.vaultPassword,
                         expiresInSeconds = selectedSeconds
                     )
+                    if (prefs.backendUrl.isNotEmpty()) {
+                        try {
+                            apiClient.syncVaultLink(
+                                backendUrl = prefs.backendUrl,
+                                vaultId = prefs.vaultId,
+                                deviceId = prefs.deviceId,
+                                password = prefs.vaultPassword,
+                                expiresInSeconds = selectedSeconds
+                            )
+                        } catch (ignored: Exception) {}
+                    }
                 }
                 Toast.makeText(this, "Expiration updated to ${options[which]}", Toast.LENGTH_SHORT).show()
             }
@@ -604,18 +627,23 @@ class MainActivity : AppCompatActivity() {
 
     private fun startLivePolling() {
         livePollJob?.cancel()
+        val broker = prefs.backendUrl
+        if (broker.isEmpty() || broker.contains("192.168.10.15")) {
+            // Serverless mode: real-time Firestore listener handles requests; do not poll dead local broker
+            return
+        }
         livePollJob = scope.launch {
             while (isActive) {
                 try {
-                    val pending = apiClient.fetchPendingRequests(prefs.backendUrl, prefs.vaultId)
+                    val pending = apiClient.fetchPendingRequests(broker, prefs.vaultId)
                     handlePendingRequests(pending)
 
-                    val clients = apiClient.fetchConnectedClients(prefs.backendUrl, prefs.vaultId)
+                    val clients = apiClient.fetchConnectedClients(broker, prefs.vaultId)
                     renderConnectedClients(clients)
                 } catch (e: Exception) {
                     // Ignore transient network errors
                 }
-                delay(1500)
+                delay(2000)
             }
         }
     }
@@ -627,6 +655,10 @@ class MainActivity : AppCompatActivity() {
         }
 
         val request = requests.first()
+        if (System.currentTimeMillis() > request.expiresAt) {
+            binding.contentMain.cardIncomingRequest.visibility = View.GONE
+            return
+        }
 
         // 1. Trigger system heads-up notification prompt if not shown yet
         if (!promptedRequestIds.contains(request.requestId)) {
@@ -789,13 +821,20 @@ class MainActivity : AppCompatActivity() {
             if (task.isSuccessful) {
                 val token = task.result
                 prefs.fcmToken = token
-                scope.launch(Dispatchers.IO) {
-                    apiClient.registerDevice(
-                        backendUrl = prefs.backendUrl,
-                        deviceId = prefs.deviceId,
-                        deviceName = prefs.deviceName,
-                        fcmToken = token
-                    )
+                val backend = prefs.backendUrl
+                if (backend.isNotEmpty() && !backend.contains("192.168.10.15")) {
+                    scope.launch(Dispatchers.IO) {
+                        try {
+                            apiClient.registerDevice(
+                                backendUrl = backend,
+                                deviceId = prefs.deviceId,
+                                deviceName = prefs.deviceName,
+                                fcmToken = token
+                            )
+                        } catch (e: Exception) {
+                            Log.w("MainActivity", "Failed to register FCM token with broker", e)
+                        }
+                    }
                 }
             }
         }

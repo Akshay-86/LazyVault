@@ -22,13 +22,20 @@ class LazyVaultFirebaseMessagingService : FirebaseMessagingService() {
         val prefs = VaultPreferences(applicationContext)
         prefs.fcmToken = token
 
-        scope.launch {
-            apiClient.registerDevice(
-                backendUrl = prefs.backendUrl,
-                deviceId = prefs.deviceId,
-                deviceName = prefs.deviceName,
-                fcmToken = token
-            )
+        val backend = prefs.backendUrl
+        if (backend.isNotEmpty() && !backend.contains("192.168.10.15")) {
+            scope.launch {
+                try {
+                    apiClient.registerDevice(
+                        backendUrl = backend,
+                        deviceId = prefs.deviceId,
+                        deviceName = prefs.deviceName,
+                        fcmToken = token
+                    )
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to register new FCM token with broker", e)
+                }
+            }
         }
     }
 

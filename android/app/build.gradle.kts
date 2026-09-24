@@ -17,12 +17,51 @@ android {
         versionName = "1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        ndk {
+            abiFilters += listOf("armeabi-v7a", "arm64-v8a", "x86", "x86_64")
+        }
+    }
+
+    splits {
+        abi {
+            isEnable = true
+            reset()
+            include("armeabi-v7a", "arm64-v8a", "x86_64")
+            isUniversalApk = true
+        }
+    }
+
+    signingConfigs {
+        create("release") {
+            val ksPath = System.getenv("KEYSTORE_PATH") ?: "release-key.jks"
+            val ksFile = file(ksPath)
+            val rootFile = rootProject.file(ksPath)
+            val altFile = file("android/app/$ksPath")
+            val targetFile = when {
+                ksFile.exists() -> ksFile
+                rootFile.exists() -> rootFile
+                else -> altFile
+            }
+
+            if (targetFile.exists()) {
+                storeFile = targetFile
+                storePassword = System.getenv("KEYSTORE_PASSWORD") ?: ""
+                keyAlias = System.getenv("KEY_ALIAS") ?: ""
+                keyPassword = System.getenv("KEY_PASSWORD") ?: ""
+            }
+        }
     }
 
     buildTypes {
         release {
             optimization {
                 enable = false
+            }
+            val releaseSigning = signingConfigs.getByName("release")
+            if (releaseSigning.storeFile != null && releaseSigning.storeFile!!.exists()) {
+                signingConfig = releaseSigning
+            } else {
+                signingConfig = signingConfigs.getByName("debug")
             }
         }
     }
@@ -52,6 +91,8 @@ dependencies {
 
     // Firebase Cloud Messaging (FCM Data Messages)
     implementation("com.google.firebase:firebase-messaging:24.0.0")
+    // Cloud Firestore (Serverless Catalog & Signaling)
+    implementation("com.google.firebase:firebase-firestore-ktx:25.0.0")
 
     // OkHttp & Coroutines
     implementation("com.squareup.okhttp3:okhttp:4.12.0")

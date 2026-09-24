@@ -13,6 +13,8 @@ import java.io.File
 import java.io.FileInputStream
 import java.io.InputStream
 import java.security.MessageDigest
+import org.json.JSONArray
+import org.json.JSONObject
 
 class VaultStorageManager(private val context: Context) {
     private val TAG = "VaultStorageManager"
@@ -49,10 +51,59 @@ class VaultStorageManager(private val context: Context) {
         Log.d(TAG, "Selected vault folder: $folderName ($uri)")
     }
 
+    private val cacheFile = File(context.filesDir, "catalog_cache.json")
+
+    fun getCachedCatalog(): List<CatalogItem>? {
+        if (!cacheFile.exists()) return null
+        return try {
+            val jsonStr = cacheFile.readText()
+            if (jsonStr.isEmpty()) return null
+            val array = JSONArray(jsonStr)
+            val list = mutableListOf<CatalogItem>()
+            for (i in 0 until array.length()) {
+                val obj = array.getJSONObject(i)
+                list.add(
+                    CatalogItem(
+                        path = obj.getString("path"),
+                        size = obj.getLong("size"),
+                        sha256 = obj.getString("sha256"),
+                        mtime = obj.optLong("mtime", 0L),
+                        name = obj.optString("name", "")
+                    )
+                )
+            }
+            if (list.isEmpty()) null else list
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed reading catalog cache", e)
+            null
+        }
+    }
+
+    fun saveCachedCatalog(files: List<CatalogItem>) {
+        try {
+            val array = JSONArray()
+            for (f in files) {
+                val obj = JSONObject().apply {
+                    put("path", f.path)
+                    put("size", f.size)
+                    put("sha256", f.sha256)
+                    put("mtime", f.mtime)
+                    put("name", f.name)
+                }
+                array.put(obj)
+            }
+            cacheFile.writeText(array.toString())
+            Log.d(TAG, "Saved ${files.size} catalog items to local cache.")
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed writing catalog cache", e)
+        }
+    }
+
     fun resetToDefaultVault() {
         prefs.selectedFolderUri = null
         prefs.selectedFolderName = null
         prefs.clearFileMappings()
+        try { cacheFile.delete() } catch (ignored: Exception) {}
         Log.d(TAG, "Reset vault to default internal storage")
     }
 
@@ -165,6 +216,7 @@ class VaultStorageManager(private val context: Context) {
 
         prefs.lastCatalogGeneration = gen
         prefs.rootMerkleHash = rootMerkle
+        saveCachedCatalog(indexed)
 
         Pair(snapshot, indexed)
     }

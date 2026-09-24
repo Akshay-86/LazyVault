@@ -14,6 +14,8 @@ import {
   AlertTriangle,
   Radio,
 } from 'lucide-react';
+import { db } from '../firebase.js';
+import { collection, addDoc, doc, onSnapshot, updateDoc, getDoc } from 'firebase/firestore';
 
 interface TransferModalProps {
   file: CatalogItem;
@@ -42,6 +44,118 @@ export const TransferModal: React.FC<TransferModalProps> = ({ file, backendUrl, 
     let isMounted = true;
 
     async function initiateRequest() {
+      // 1. Try Cloud Firestore (Serverless)
+      if (vaultId) {
+        try {
+          const reqRef = await addDoc(collection(db, 'vaults', vaultId, 'requests'), {
+            path: file.path,
+            name: file.name || file.path.split('/').pop() || 'file',
+            sha256: file.sha256,
+            size: file.size,
+            status: 'WAITING_FOR_APPROVAL',
+            requesterContext: `Web Browser (${navigator.userAgent.split(' ')[0]})`,
+            requesterIp: 'Remote Client',
+            supportedTransports: ['webrtc'],
+            createdAt: Date.now(),
+            expiresAt: Date.now() + 60000,
+          });
+
+          const generatedReqId = reqRef.id;
+          if (isMounted) {
+            setRequestId(generatedReqId);
+            setStatus('WAITING_FOR_APPROVAL');
+            setTimeRemainingSec(60);
+          }
+
+          // Initialize serverless WebRTC DataChannel receiver immediately
+          const receiver = new WebRTCReceiver({
+            requestId: generatedReqId,
+            backendUrl: '',
+            vaultId: vaultId,
+            expectedSha256: file.sha256,
+            filename: file.name || file.path.split('/').pop() || 'download',
+            totalSize: file.size,
+            onProgress: (p) => {
+              if (isMounted) {
+                setStatus('TRANSFERRING');
+                setTransferProgress(p);
+              }
+            },
+            onComplete: (_blob, sha) => {
+              if (isMounted) {
+                setStatus('COMPLETED');
+                setIsIntegrityVerified(true);
+                setVerifiedSha256(sha);
+              }
+            },
+            onError: (err) => {
+              if (isMounted) {
+                setStatus('FAILED');
+                setErrorMessage(err.message);
+              }
+            },
+          });
+          receiverRef.current = receiver;
+          await receiver.start();
+
+          // Real-time listener for mobile node decision!
+          const unsub = onSnapshot(doc(db, 'vaults', vaultId, 'requests', generatedReqId), (snap) => {
+            if (snap.exists() && isMounted) {
+              const data = snap.data();
+              if (data.status) {
+                if (data.status === 'APPROVED') {
+                  setStatus('TRANSFERRING');
+                } else if (data.status === 'REJECTED') {
+                  setStatus('REJECTED');
+                  setErrorMessage('Transfer was denied on the Android device.');
+                  receiver.close();
+                } else if (data.status === 'COMPLETED') {
+                  setStatus('COMPLETED');
+                  setIsIntegrityVerified(true);
+                  setVerifiedSha256(data.sha256 || file.sha256);
+                }
+              }
+            }
+          });
+
+          // Countdown timer
+          countdownIntervalRef.current = setInterval(() => {
+            setTimeRemainingSec((prev) => {
+              if (prev <= 1) {
+                clearInterval(countdownIntervalRef.current);
+                setStatus('EXPIRED');
+                setErrorMessage('Request timed out after 60 seconds.');
+                if (vaultId) {
+                  updateDoc(doc(db, 'vaults', vaultId, 'requests', generatedReqId), {
+                    status: 'EXPIRED',
+                    updatedAt: Date.now(),
+                  }).catch(console.warn);
+                }
+                return 0;
+              }
+              return prev - 1;
+            });
+          }, 1000);
+
+          return () => {
+            unsub();
+            if (vaultId) {
+              getDoc(doc(db, 'vaults', vaultId, 'requests', generatedReqId)).then((snap) => {
+                if (snap.exists() && snap.data().status === 'WAITING_FOR_APPROVAL') {
+                  updateDoc(doc(db, 'vaults', vaultId, 'requests', generatedReqId), {
+                    status: 'CANCELLED',
+                    updatedAt: Date.now(),
+                  }).catch(console.warn);
+                }
+              }).catch(console.warn);
+            }
+          };
+        } catch (firestoreErr) {
+          console.warn('Firestore request failed, trying REST fallback:', firestoreErr);
+        }
+      }
+
+      // 2. Fallback to REST backend
       try {
         const res = await fetch(`${backendUrl}/api/v1/request-file`, {
           method: 'POST',
@@ -106,9 +220,9 @@ export const TransferModal: React.FC<TransferModalProps> = ({ file, backendUrl, 
     };
   }, [status]);
 
-  // 3. Status Polling / SSE Handler
+  // 3. Status Polling / SSE Handler (Legacy REST mode only)
   useEffect(() => {
-    if (!requestId || ['COMPLETED', 'REJECTED', 'EXPIRED', 'FAILED'].includes(status)) {
+    if (!requestId || vaultId || ['COMPLETED', 'REJECTED', 'EXPIRED', 'FAILED'].includes(status)) {
       return;
     }
 
@@ -457,6 +571,16 @@ function sha256Bytes(bytes: Uint8Array): string {
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
   };
 
+  const handleClose = () => {
+    if (status === 'WAITING_FOR_APPROVAL' && requestId && vaultId) {
+      updateDoc(doc(db, 'vaults', vaultId, 'requests', requestId), {
+        status: 'CANCELLED',
+        updatedAt: Date.now(),
+      }).catch(console.warn);
+    }
+    onClose();
+  };
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-200">
       <div className="w-full max-w-lg bg-[#0f172a] border border-slate-700/80 rounded-2xl shadow-2xl overflow-hidden">
@@ -467,7 +591,7 @@ function sha256Bytes(bytes: Uint8Array): string {
             <h2 className="text-base font-bold text-slate-100">Zero-Trust Retrieval Pipeline</h2>
           </div>
           <button
-            onClick={onClose}
+            onClick={handleClose}
             className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition"
           >
             <X className="h-5 w-5" />
@@ -637,7 +761,7 @@ function sha256Bytes(bytes: Uint8Array): string {
         {/* Modal Footer */}
         <div className="px-6 py-4 bg-[#0b1120] border-t border-slate-800 flex justify-end">
           <button
-            onClick={onClose}
+            onClick={handleClose}
             className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold rounded-lg transition"
           >
             {status === 'COMPLETED' ? 'Done' : 'Dismiss'}

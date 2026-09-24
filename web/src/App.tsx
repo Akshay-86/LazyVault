@@ -5,21 +5,32 @@ import { CatalogTable } from './components/CatalogTable.js';
 import { TransferModal } from './components/TransferModal.js';
 import { ManualRequestForm } from './components/ManualRequestForm.js';
 import { PasswordGate } from './components/PasswordGate.js';
-import { ShieldCheck, Cpu, Lock, Radio, Clock } from 'lucide-react';
+import { ShieldCheck, Cpu, Lock, Radio, Clock, ArrowRight } from 'lucide-react';
+import { db } from './firebase.js';
+import { doc, onSnapshot } from 'firebase/firestore';
 
 export const App: React.FC = () => {
   const [catalog, setCatalog] = useState<CatalogResponse | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [activeTransferFile, setActiveTransferFile] = useState<CatalogItem | null>(null);
-  const [vaultId, setVaultId] = useState<string | null>(null);
+  const [vaultId, setVaultId] = useState<string | null>(() => {
+    const path = window.location.pathname;
+    if (path.startsWith('/v/')) {
+      const id = path.replace('/v/', '').split('/')[0];
+      if (id) return id;
+    }
+    const params = new URLSearchParams(window.location.search);
+    return params.get('v') || null;
+  });
   const [isLocked, setIsLocked] = useState<boolean>(true);
   const [hasPassword, setHasPassword] = useState<boolean>(false);
   const [isExpired, setIsExpired] = useState<boolean>(false);
   const [expiresAt, setExpiresAt] = useState<number | null>(null);
+  const [inputVaultInput, setInputVaultInput] = useState<string>('');
 
   const backendUrl = import.meta.env.VITE_BACKEND_URL || '';
 
-  // 1. Parse Vault ID from URL
+  // 1. Parse Vault ID on location changes
   useEffect(() => {
     const path = window.location.pathname;
     if (path.startsWith('/v/')) {
@@ -32,43 +43,85 @@ export const App: React.FC = () => {
     }
   }, []);
 
-  // 2. Query Vault security & expiry info
+  // 2. Query Vault security & expiry info directly from Cloud Firestore
   useEffect(() => {
     if (!vaultId) {
       setIsLocked(false);
       return;
     }
 
-    fetch(`${backendUrl}/api/v1/vault/${vaultId}/info`)
-      .then((r) => r.json())
-      .then((data) => {
-        if (data.isExpired) {
-          setIsExpired(true);
-          setIsLocked(false);
-          return;
-        }
+    // Direct real-time listener from Cloud Firestore (100% Serverless!)
+    const unsubscribe = onSnapshot(
+      doc(db, 'vaults', vaultId),
+      (docSnap) => {
+        if (docSnap.exists()) {
+          const data = docSnap.data();
+          const now = Date.now();
+          const expAt = data.expiresAt || null;
 
-        if (data.expiresAt) {
-          setExpiresAt(data.expiresAt);
-        }
+          if (expAt && expAt > 0 && now > expAt) {
+            setIsExpired(true);
+            setIsLocked(false);
+            return;
+          }
 
-        if (data.requiresPassword) {
-          setHasPassword(true);
-          // Always locked on every restart/reload!
-          setIsLocked(true);
+          if (expAt) {
+            setExpiresAt(expAt);
+          }
+
+          if (data.requiresPassword) {
+            setHasPassword(true);
+            setIsLocked(true); // Always lock on load / reload!
+          } else {
+            setHasPassword(false);
+            setIsLocked(false);
+          }
+
+          if (data.files && Array.isArray(data.files)) {
+            const fileList: CatalogItem[] = data.files.map((f: any) => ({
+              path: f.path,
+              name: f.name || f.path.split('/').pop() || 'file',
+              size: f.size,
+              sha256: f.sha256,
+              mtime: f.mtime,
+            }));
+            setCatalog({
+              status: 'success',
+              root_hash: data.merkleRoot || '',
+              updated_at: data.updatedAt || Date.now(),
+              total_size_bytes: fileList.reduce((acc, f) => acc + (f.size || 0), 0),
+              item_count: fileList.length,
+              device_id: data.deviceId || 'Android Storage Node',
+              files: fileList,
+            });
+            setIsLoading(false);
+          }
         } else {
-          setHasPassword(false);
-          setIsLocked(false);
+          // Fallback to local REST backend if available
+          if (backendUrl) {
+            fetch(`${backendUrl}/api/v1/vault/${vaultId}/info`)
+              .then((r) => r.json())
+              .then((data) => {
+                if (data.isExpired) setIsExpired(true);
+                if (data.expiresAt) setExpiresAt(data.expiresAt);
+                setHasPassword(!!data.requiresPassword);
+                setIsLocked(!!data.requiresPassword);
+              })
+              .catch((err) => console.warn('Fallback query error:', err));
+          }
         }
-      })
-      .catch((err) => {
-        console.warn('Failed to query vault info:', err);
-        setIsLocked(false);
-      });
+      },
+      (err) => {
+        console.warn('Firestore snapshot error, trying fallback:', err);
+      }
+    );
+
+    return () => unsubscribe();
   }, [vaultId, backendUrl]);
 
-  // 3. Fetch catalog
+  // 3. Fallback Fetch catalog if REST is used
   const fetchCatalog = useCallback(async () => {
+    if (catalog?.files && catalog.files.length > 0) return;
     setIsLoading(true);
     try {
       const url = vaultId ? `${backendUrl}/api/v1/catalog?vaultId=${vaultId}` : `${backendUrl}/api/v1/catalog`;
@@ -82,13 +135,13 @@ export const App: React.FC = () => {
     } finally {
       setIsLoading(false);
     }
-  }, [backendUrl, vaultId]);
+  }, [backendUrl, vaultId, catalog]);
 
   useEffect(() => {
-    if (!isLocked && !isExpired) {
+    if (!isLocked && !isExpired && !catalog) {
       fetchCatalog();
     }
-  }, [fetchCatalog, isLocked, isExpired]);
+  }, [fetchCatalog, isLocked, isExpired, catalog]);
 
   // 4. Render Link Expired Screen
   if (isExpired && vaultId) {
@@ -116,7 +169,83 @@ export const App: React.FC = () => {
     );
   }
 
-  // 5. Render Password Gate if locked
+  // 5. Render Connect to Vault Screen if no vaultId provided in URL
+  if (!vaultId) {
+    const handleConnectVault = (e: React.FormEvent) => {
+      e.preventDefault();
+      const trimmed = inputVaultInput.trim();
+      if (!trimmed) return;
+      let extractedId = trimmed;
+      if (trimmed.includes('/v/')) {
+        extractedId = trimmed.split('/v/')[1].split(/[/?#]/)[0];
+      } else if (trimmed.includes('?v=')) {
+        try {
+          extractedId = new URL(trimmed).searchParams.get('v') || trimmed;
+        } catch {
+          extractedId = trimmed.split('?v=')[1].split('&')[0];
+        }
+      }
+      if (extractedId) {
+        window.history.pushState({}, '', `/v/${extractedId}`);
+        setVaultId(extractedId);
+        setIsLoading(true);
+        setIsLocked(true);
+      }
+    };
+
+    return (
+      <div className="min-h-screen bg-[#070b14] flex flex-col items-center justify-center p-4">
+        <div className="absolute w-96 h-96 bg-cyan-500/10 rounded-full blur-3xl -z-10 pointer-events-none" />
+        <div className="w-full max-w-md bg-[#0f172a] border border-slate-800 rounded-2xl p-8 shadow-2xl space-y-6">
+          <div className="text-center space-y-2">
+            <div className="h-16 w-16 mx-auto rounded-2xl bg-cyan-950/60 border border-cyan-800 flex items-center justify-center shadow-lg shadow-cyan-500/10">
+              <Radio className="h-8 w-8 text-cyan-400" />
+            </div>
+            <h2 className="text-xl font-bold text-white">Connect to LazyVault</h2>
+            <p className="text-xs text-slate-400">
+              Enter your Vault ID or paste your shareable link from the Android LazyVault app.
+            </p>
+          </div>
+
+          <form onSubmit={handleConnectVault} className="space-y-4">
+            <div>
+              <label className="block text-xs font-medium text-slate-300 mb-1.5">
+                Vault ID or Share Link
+              </label>
+              <input
+                type="text"
+                placeholder="e.g. vlt_51f0ba6084 or full URL"
+                value={inputVaultInput}
+                onChange={(e) => setInputVaultInput(e.target.value)}
+                className="w-full px-4 py-2.5 bg-slate-900 border border-slate-700 rounded-xl text-white font-mono text-sm placeholder-slate-500 focus:outline-none focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500 transition-colors"
+                autoFocus
+              />
+            </div>
+            <button
+              type="submit"
+              disabled={!inputVaultInput.trim()}
+              className="w-full py-2.5 px-4 bg-cyan-500 hover:bg-cyan-400 disabled:opacity-50 disabled:cursor-not-allowed text-slate-950 font-semibold rounded-xl text-sm transition-all flex items-center justify-center space-x-2 shadow-lg shadow-cyan-500/20"
+            >
+              <span>Connect to Vault</span>
+              <ArrowRight className="h-4 w-4" />
+            </button>
+          </form>
+
+          <div className="p-3 rounded-xl bg-slate-900/60 border border-slate-800 text-[11px] text-slate-400 space-y-1">
+            <div className="font-semibold text-slate-300 flex items-center space-x-1.5">
+              <ShieldCheck className="h-3.5 w-3.5 text-cyan-400" />
+              <span>Zero-Trust Storage Node</span>
+            </div>
+            <p>
+              LazyVault connects directly peer-to-peer to your mobile device via WebRTC with hardware cryptographic verification.
+            </p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // 6. Render Password Gate if locked
   if (isLocked && vaultId) {
     return (
       <PasswordGate

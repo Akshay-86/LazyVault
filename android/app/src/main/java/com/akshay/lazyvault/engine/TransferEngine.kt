@@ -4,9 +4,11 @@ import android.content.Context
 import android.util.Base64
 import android.util.Log
 import com.akshay.lazyvault.data.AuditLogEntry
+import com.akshay.lazyvault.net.FirebaseVaultManager
 import com.akshay.lazyvault.net.VaultApiClient
 import com.akshay.lazyvault.storage.VaultPreferences
 import com.akshay.lazyvault.storage.VaultStorageManager
+import com.google.firebase.firestore.ListenerRegistration
 import io.webrtc.*
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -59,30 +61,34 @@ class TransferEngine(private val context: Context) {
             testStream.close()
         } catch (ignored: Exception) {}
 
-        var transportUsed = "relay"
+        var transportUsed = "webrtc"
         var success = false
 
-        // Check if Relay is requested or available (zero-trust, instantaneous, highly resilient)
-        if (supportedTransports.contains("relay")) {
-            onProgress(15, "Starting encrypted ephemeral zero-trust relay...")
-            success = executeRelayTransfer(backendUrl, requestId, path, targetSha256, onProgress)
-            transportUsed = "relay"
-        } else if (supportedTransports.contains("webrtc")) {
+        // Prefer WebRTC P2P DataChannels for direct, zero-trust browser transfer
+        if (supportedTransports.contains("webrtc")) {
             onProgress(10, "Attempting WebRTC P2P DataChannel transfer...")
             val webrtcSuccess = executeWebRtcTransfer(backendUrl, requestId, path, targetSha256, onProgress)
             if (webrtcSuccess) {
                 success = true
                 transportUsed = "webrtc"
-            } else {
+            } else if (supportedTransports.contains("relay") && backendUrl.isNotEmpty()) {
                 Log.w(TAG, "WebRTC transfer could not complete or timed out. Falling back to Encrypted Ephemeral Relay.")
                 onProgress(20, "WebRTC peer unavailable. Falling back to encrypted relay...")
                 success = executeRelayTransfer(backendUrl, requestId, path, targetSha256, onProgress)
                 transportUsed = "relay"
             }
-        } else {
-            // Default to relay
+        } else if (supportedTransports.contains("relay")) {
+            onProgress(15, "Starting encrypted ephemeral zero-trust relay...")
             success = executeRelayTransfer(backendUrl, requestId, path, targetSha256, onProgress)
             transportUsed = "relay"
+        } else {
+            // Default to WebRTC
+            onProgress(10, "Attempting WebRTC P2P DataChannel transfer...")
+            val webrtcSuccess = executeWebRtcTransfer(backendUrl, requestId, path, targetSha256, onProgress)
+            if (webrtcSuccess) {
+                success = true
+                transportUsed = "webrtc"
+            }
         }
 
         prefs.addAuditEntry(
@@ -102,6 +108,7 @@ class TransferEngine(private val context: Context) {
 
     /**
      * WebRTC DataChannel Streaming with STUN hole punching and backpressure handling
+     * Uses Cloud Firestore for serverless signaling (with fallback to REST broker)
      */
     private suspend fun executeWebRtcTransfer(
         backendUrl: String,
@@ -110,6 +117,8 @@ class TransferEngine(private val context: Context) {
         targetSha256: String,
         onProgress: (percent: Int, status: String) -> Unit
     ): Boolean = withContext(Dispatchers.IO) {
+        val firebaseVaultManager = FirebaseVaultManager(context)
+        var callerCandSub: ListenerRegistration? = null
         try {
             // Initialize PeerConnectionFactory
             PeerConnectionFactory.initialize(
@@ -121,50 +130,70 @@ class TransferEngine(private val context: Context) {
 
             val iceServers = listOf(
                 PeerConnection.IceServer.builder("stun:stun.l.google.com:19302").createIceServer(),
-                PeerConnection.IceServer.builder("stun:stun1.l.google.com:19302").createIceServer()
+                PeerConnection.IceServer.builder("stun:stun1.l.google.com:19302").createIceServer(),
+                PeerConnection.IceServer.builder("stun:stun2.l.google.com:19302").createIceServer(),
+                PeerConnection.IceServer.builder("stun:stun.cloudflare.com:3478").createIceServer()
             )
 
             val rtcConfig = PeerConnection.RTCConfiguration(iceServers).apply {
                 sdpSemantics = PeerConnection.SdpSemantics.UNIFIED_PLAN
             }
 
-            var remoteOfferReceived = false
-            var offerPayload: JSONObject? = null
-
-            // Poll for browser's SDP Offer (max 10 seconds)
-            val startTime = System.currentTimeMillis()
-            while (System.currentTimeMillis() - startTime < 10000L) {
-                val messages = apiClient.pollSignaling(backendUrl, requestId, peer = "device")
-                if (messages != null && messages.length() > 0) {
-                    for (i in 0 until messages.length()) {
-                        val msg = messages.getJSONObject(i)
-                        if (msg.optString("sender") == "client" && msg.optString("type") == "offer") {
-                            offerPayload = msg.getJSONObject("payload")
-                            remoteOfferReceived = true
-                            break
+            onProgress(12, "Waiting for browser WebRTC offer...")
+            val offerPair = firebaseVaultManager.waitForOffer(requestId, timeoutMs = 15000L)
+            val sdpString: String
+            if (offerPair != null) {
+                sdpString = offerPair.first
+                Log.d(TAG, "WebRTC offer received via Firestore for $requestId")
+            } else {
+                // Fallback check REST if backendUrl configured
+                var restOffer: JSONObject? = null
+                val startTime = System.currentTimeMillis()
+                while (System.currentTimeMillis() - startTime < 5000L && backendUrl.isNotEmpty()) {
+                    try {
+                        val messages = apiClient.pollSignaling(backendUrl, requestId, peer = "device")
+                        if (messages != null && messages.length() > 0) {
+                            for (i in 0 until messages.length()) {
+                                val msg = messages.getJSONObject(i)
+                                if (msg.optString("sender") == "client" && msg.optString("type") == "offer") {
+                                    restOffer = msg.getJSONObject("payload")
+                                    break
+                                }
+                            }
                         }
-                    }
+                    } catch (ignored: Exception) {}
+                    if (restOffer != null) break
+                    delay(1000)
                 }
-                if (remoteOfferReceived) break
-                delay(1000)
-            }
 
-            if (!remoteOfferReceived || offerPayload == null) {
-                Log.d(TAG, "No WebRTC offer received from browser in 10s, switching to relay")
-                factory.dispose()
-                return@withContext false
+                if (restOffer == null) {
+                    Log.d(TAG, "No WebRTC offer received from browser within 15s")
+                    factory.dispose()
+                    return@withContext false
+                }
+                sdpString = restOffer.getString("sdp")
             }
 
             onProgress(20, "WebRTC offer received. Negotiating peer connection...")
 
             var activeDataChannel: DataChannel? = null
             var channelOpened = false
+            var isRemoteDescSet = false
+            val queuedCandidates = mutableListOf<IceCandidate>()
+
+            var peerConnection: PeerConnection? = null
 
             val observer = object : PeerConnection.Observer {
-                override fun onSignalingChange(state: PeerConnection.SignalingState?) {}
-                override fun onIceConnectionChange(state: PeerConnection.IceConnectionState?) {}
+                override fun onSignalingChange(state: PeerConnection.SignalingState?) {
+                    Log.d(TAG, "SignalingState: $state")
+                }
+                override fun onIceConnectionChange(state: PeerConnection.IceConnectionState?) {
+                    Log.d(TAG, "IceConnectionState: $state")
+                }
                 override fun onIceConnectionReceivingChange(receiving: Boolean) {}
-                override fun onIceGatheringChange(state: PeerConnection.IceGatheringState?) {}
+                override fun onIceGatheringChange(state: PeerConnection.IceGatheringState?) {
+                    Log.d(TAG, "IceGatheringState: $state")
+                }
                 override fun onIceCandidatesRemoved(candidates: Array<out IceCandidate>?) {}
                 override fun onAddStream(stream: MediaStream?) {}
                 override fun onRemoveStream(stream: MediaStream?) {}
@@ -172,24 +201,43 @@ class TransferEngine(private val context: Context) {
 
                 override fun onIceCandidate(candidate: IceCandidate?) {
                     if (candidate != null) {
-                        val candJson = JSONObject().apply {
-                            put("sdpMid", candidate.sdpMid)
-                            put("sdpMLineIndex", candidate.sdpMLineIndex)
-                            put("candidate", candidate.sdp)
-                        }
                         scope.launch {
-                            apiClient.sendSignaling(backendUrl, requestId, "device", "candidate", candJson)
+                            try {
+                                firebaseVaultManager.addCalleeCandidate(
+                                    requestId,
+                                    candidate.sdp,
+                                    candidate.sdpMid,
+                                    candidate.sdpMLineIndex
+                                )
+                            } catch (e: Exception) {
+                                Log.w(TAG, "Failed to write callee candidate to Firestore", e)
+                            }
+                            if (backendUrl.isNotEmpty()) {
+                                try {
+                                    val candJson = JSONObject().apply {
+                                        put("sdpMid", candidate.sdpMid)
+                                        put("sdpMLineIndex", candidate.sdpMLineIndex)
+                                        put("candidate", candidate.sdp)
+                                    }
+                                    apiClient.sendSignaling(backendUrl, requestId, "device", "candidate", candJson)
+                                } catch (ignored: Exception) {}
+                            }
                         }
                     }
                 }
 
                 override fun onDataChannel(dc: DataChannel?) {
                     if (dc != null) {
-                        Log.d(TAG, "WebRTC DataChannel received: ${dc.label()}")
+                        Log.d(TAG, "WebRTC DataChannel received: ${dc.label()}, state: ${dc.state()}")
                         activeDataChannel = dc
+                        if (dc.state() == DataChannel.State.OPEN) {
+                            Log.d(TAG, "WebRTC DataChannel is ALREADY OPEN!")
+                            channelOpened = true
+                        }
                         dc.registerObserver(object : DataChannel.Observer {
                             override fun onBufferedAmountChange(previousAmount: Long) {}
                             override fun onStateChange() {
+                                Log.d(TAG, "DataChannel onStateChange: ${dc.state()}")
                                 if (dc.state() == DataChannel.State.OPEN) {
                                     Log.d(TAG, "WebRTC DataChannel is now OPEN!")
                                     channelOpened = true
@@ -201,56 +249,92 @@ class TransferEngine(private val context: Context) {
                 }
             }
 
-            val peerConnection = factory.createPeerConnection(rtcConfig, observer) ?: run {
+            peerConnection = factory.createPeerConnection(rtcConfig, observer) ?: run {
                 factory.dispose()
                 return@withContext false
             }
 
+            // Listen for caller candidates from browser via Firestore
+            callerCandSub = firebaseVaultManager.listenToCallerCandidates(requestId) { sdp, sdpMid, sdpMLineIndex ->
+                val cand = IceCandidate(sdpMid, sdpMLineIndex, sdp)
+                synchronized(queuedCandidates) {
+                    if (isRemoteDescSet) {
+                        peerConnection?.addIceCandidate(cand)
+                    } else {
+                        queuedCandidates.add(cand)
+                    }
+                }
+            }
+
             // Set Remote Description (Offer)
-            val sdpString = offerPayload.getString("sdp")
             val remoteDesc = SessionDescription(SessionDescription.Type.OFFER, sdpString)
 
             peerConnection.setRemoteDescription(object : SdpObserver {
                 override fun onCreateSuccess(p0: SessionDescription?) {}
                 override fun onSetSuccess() {
                     Log.d(TAG, "Remote description set successfully")
+                    synchronized(queuedCandidates) {
+                        isRemoteDescSet = true
+                        queuedCandidates.forEach { peerConnection?.addIceCandidate(it) }
+                        queuedCandidates.clear()
+                    }
+
                     // Create Answer
-                    peerConnection.createAnswer(object : SdpObserver {
+                    peerConnection?.createAnswer(object : SdpObserver {
                         override fun onCreateSuccess(answer: SessionDescription?) {
                             if (answer != null) {
-                                peerConnection.setLocalDescription(object : SdpObserver {
+                                peerConnection?.setLocalDescription(object : SdpObserver {
                                     override fun onCreateSuccess(p0: SessionDescription?) {}
                                     override fun onSetSuccess() {
-                                        val answerPayload = JSONObject().apply {
-                                            put("sdp", answer.description)
-                                            put("type", "answer")
-                                        }
+                                        Log.d(TAG, "Local description set successfully (Answer)")
                                         scope.launch {
-                                            apiClient.sendSignaling(backendUrl, requestId, "device", "answer", answerPayload)
+                                            firebaseVaultManager.saveAnswer(requestId, answer.description, "answer")
+                                            if (backendUrl.isNotEmpty()) {
+                                                try {
+                                                    val answerPayload = JSONObject().apply {
+                                                        put("sdp", answer.description)
+                                                        put("type", "answer")
+                                                    }
+                                                    apiClient.sendSignaling(backendUrl, requestId, "device", "answer", answerPayload)
+                                                } catch (ignored: Exception) {}
+                                            }
                                         }
                                     }
-                                    override fun onCreateFailure(p0: String?) {}
-                                    override fun onSetFailure(p0: String?) {}
+                                    override fun onCreateFailure(p0: String?) {
+                                        Log.e(TAG, "setLocalDescription failure: $p0")
+                                    }
+                                    override fun onSetFailure(p0: String?) {
+                                        Log.e(TAG, "setLocalDescription onSetFailure: $p0")
+                                    }
                                 }, answer)
                             }
                         }
                         override fun onSetSuccess() {}
-                        override fun onCreateFailure(p0: String?) {}
-                        override fun onSetFailure(p0: String?) {}
+                        override fun onCreateFailure(p0: String?) {
+                            Log.e(TAG, "createAnswer failure: $p0")
+                        }
+                        override fun onSetFailure(p0: String?) {
+                            Log.e(TAG, "createAnswer onSetFailure: $p0")
+                        }
                     }, MediaConstraints())
                 }
-                override fun onCreateFailure(p0: String?) {}
-                override fun onSetFailure(p0: String?) {}
+                override fun onCreateFailure(p0: String?) {
+                    Log.e(TAG, "setRemoteDescription failure: $p0")
+                }
+                override fun onSetFailure(p0: String?) {
+                    Log.e(TAG, "setRemoteDescription onSetFailure: $p0")
+                }
             }, remoteDesc)
 
-            // Wait for DataChannel to Open (max 10 seconds)
+            // Wait for DataChannel to Open (max 20 seconds)
             val channelWaitStart = System.currentTimeMillis()
-            while (!channelOpened && System.currentTimeMillis() - channelWaitStart < 10000L) {
-                delay(300)
+            while (!channelOpened && System.currentTimeMillis() - channelWaitStart < 20000L) {
+                delay(200)
             }
 
             if (!channelOpened || activeDataChannel == null) {
-                Log.w(TAG, "DataChannel did not open within timeout, falling back to relay")
+                Log.w(TAG, "DataChannel did not open within timeout")
+                callerCandSub?.remove()
                 peerConnection.close()
                 factory.dispose()
                 return@withContext false
@@ -263,6 +347,7 @@ class TransferEngine(private val context: Context) {
             val fileLength = storageManager.getFileSize(path, targetSha256)
             val inputStream = storageManager.openInputStream(path, targetSha256) ?: run {
                 Log.e(TAG, "Failed to open input stream for $path ($targetSha256)")
+                callerCandSub?.remove()
                 peerConnection.close()
                 factory.dispose()
                 return@withContext false
@@ -301,13 +386,16 @@ class TransferEngine(private val context: Context) {
             dc.send(eofBuffer)
 
             onProgress(100, "WebRTC transfer completed!")
-            delay(500)
+            firebaseVaultManager.updateRequestStatus(requestId, "COMPLETED")
+            delay(1000)
 
+            callerCandSub?.remove()
             peerConnection.close()
             factory.dispose()
             true
         } catch (e: Exception) {
             Log.e(TAG, "WebRTC transfer exception", e)
+            callerCandSub?.remove()
             false
         }
     }

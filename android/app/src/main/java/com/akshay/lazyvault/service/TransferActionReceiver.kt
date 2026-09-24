@@ -11,6 +11,7 @@ import android.os.PersistableBundle
 import android.util.Log
 import androidx.core.content.ContextCompat
 import com.akshay.lazyvault.data.AuditLogEntry
+import com.akshay.lazyvault.net.FirebaseVaultManager
 import com.akshay.lazyvault.net.VaultApiClient
 import com.akshay.lazyvault.storage.VaultPreferences
 import kotlinx.coroutines.CoroutineScope
@@ -54,18 +55,26 @@ class TransferActionReceiver : BroadcastReceiver() {
                     )
                 )
 
+                VaultNotificationManager.dismissNotification(context, requestId)
+                FirebaseVaultManager(context).updateRequestStatus(requestId, status = "REJECTED", decision = "DENY")
+
                 scope.launch {
-                    apiClient.sendDecision(
-                        backendUrl = backendUrl,
-                        requestId = requestId,
-                        decision = "DENY",
-                        reason = "User explicitly denied request on Android node"
-                    )
+                    if (backendUrl.isNotEmpty() && !backendUrl.contains("192.168.10.15")) {
+                        try {
+                            apiClient.sendDecision(
+                                backendUrl = backendUrl,
+                                requestId = requestId,
+                                decision = "DENY",
+                                reason = "User explicitly denied request on Android node"
+                            )
+                        } catch (ignored: Exception) {}
+                    }
                 }
             }
 
             ACTION_ALLOW -> {
                 Log.d(TAG, "Transfer ALLOWED by user for $requestId. Determining transport...")
+                VaultNotificationManager.dismissNotification(context, requestId)
                 val selectedTransport = if (transports.contains("webrtc")) "webrtc" else "relay"
 
                 prefs.addAuditEntry(
@@ -80,13 +89,19 @@ class TransferActionReceiver : BroadcastReceiver() {
                     )
                 )
 
+                FirebaseVaultManager(context).updateRequestStatus(requestId, status = "APPROVED", decision = "ALLOW")
+
                 scope.launch {
-                    apiClient.sendDecision(
-                        backendUrl = backendUrl,
-                        requestId = requestId,
-                        decision = "ALLOW",
-                        selectedTransport = selectedTransport
-                    )
+                    if (backendUrl.isNotEmpty() && !backendUrl.contains("192.168.10.15")) {
+                        try {
+                            apiClient.sendDecision(
+                                backendUrl = backendUrl,
+                                requestId = requestId,
+                                decision = "ALLOW",
+                                selectedTransport = selectedTransport
+                            )
+                        } catch (ignored: Exception) {}
+                    }
                 }
 
                 // Android 14+ (API 34+): Enqueue User-Initiated Data Transfer (UIDT) Job via JobScheduler

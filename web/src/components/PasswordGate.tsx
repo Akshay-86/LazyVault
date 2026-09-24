@@ -1,6 +1,9 @@
 import React, { useState } from 'react';
 import { Lock, KeyRound, ShieldAlert, ArrowRight, Eye, EyeOff, CheckCircle2 } from 'lucide-react';
 
+import { db } from '../firebase.js';
+import { doc, getDoc } from 'firebase/firestore';
+
 interface PasswordGateProps {
   vaultId: string;
   backendUrl: string;
@@ -21,19 +24,47 @@ export const PasswordGate: React.FC<PasswordGateProps> = ({ vaultId, backendUrl,
     setError(null);
 
     try {
-      const res = await fetch(`${backendUrl}/api/v1/vault/${vaultId}/verify-password`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ password }),
-      });
+      // 1. Try checking against Cloud Firestore (Serverless)
+      const docSnap = await getDoc(doc(db, 'vaults', vaultId));
+      if (docSnap.exists()) {
+        const vaultData = docSnap.data();
+        if (vaultData.passwordHash) {
+          const encoder = new TextEncoder();
+          const data = encoder.encode(password);
+          const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+          const hashArray = Array.from(new Uint8Array(hashBuffer));
+          const enteredHash = hashArray.map((b) => b.toString(16).padStart(2, '0')).join('');
 
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        throw new Error(data.error || 'Incorrect passcode. Check your Android device.');
+          if (enteredHash === vaultData.passwordHash) {
+            onUnlocked();
+            return;
+          } else {
+            throw new Error('Incorrect passcode. Check your Android device.');
+          }
+        } else {
+          // No password required
+          onUnlocked();
+          return;
+        }
       }
 
-      // Do not store in sessionStorage so every restart/reload requires passcode
-      onUnlocked();
+      // 2. Fallback to REST endpoint if configured
+      if (backendUrl) {
+        const res = await fetch(`${backendUrl}/api/v1/vault/${vaultId}/verify-password`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ password }),
+        });
+
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          throw new Error(data.error || 'Incorrect passcode. Check your Android device.');
+        }
+
+        onUnlocked();
+      } else {
+        throw new Error('Vault not found in cloud storage.');
+      }
     } catch (err: any) {
       setError(err.message);
     } finally {

@@ -34,6 +34,11 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
+.firebase/
+**/.firebase/
+firebase-debug.log*
+firestore-debug.log*
+ui-debug.log*
 
 # --- Backend Ephemeral & Runtime Storage ---
 # CRITICAL: Never commit ephemeral client payloads or runtime caches
