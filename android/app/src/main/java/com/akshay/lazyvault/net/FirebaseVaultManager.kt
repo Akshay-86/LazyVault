@@ -22,6 +22,7 @@ class FirebaseVaultManager(private val context: Context) {
         private val handledRequestIds = java.util.Collections.synchronizedSet(mutableSetOf<String>())
     }
     private var requestListener: ListenerRegistration? = null
+    private var clientsListener: ListenerRegistration? = null
 
     suspend fun syncVaultToFirestore(
         snapshot: CatalogSnapshot,
@@ -145,6 +146,49 @@ class FirebaseVaultManager(private val context: Context) {
     fun stopListening() {
         requestListener?.remove()
         requestListener = null
+        stopListeningForClients()
+    }
+
+    fun startListeningForClients(onClientsUpdated: (List<com.akshay.lazyvault.data.ConnectedClient>) -> Unit) {
+        val vaultId = prefs.vaultId
+        clientsListener?.remove()
+
+        clientsListener = firestore.collection("vaults").document(vaultId)
+            .collection("clients")
+            .addSnapshotListener { snapshots, error ->
+                if (error != null) {
+                    Log.w(TAG, "Listen failed on clients", error)
+                    return@addSnapshotListener
+                }
+
+                val now = System.currentTimeMillis()
+                val list = mutableListOf<com.akshay.lazyvault.data.ConnectedClient>()
+                snapshots?.documents?.forEach { doc ->
+                    val lastSeen = doc.getLong("lastSeen") ?: 0L
+                    if (now - lastSeen < 45000L) {
+                        val clientId = doc.getString("clientId") ?: doc.id
+                        val deviceName = doc.getString("deviceName") ?: "Web Client"
+                        val ip = doc.getString("ip") ?: "Remote Client"
+                        val connectedAt = doc.getLong("connectedAt") ?: lastSeen
+                        list.add(
+                            com.akshay.lazyvault.data.ConnectedClient(
+                                clientId = clientId,
+                                ip = ip,
+                                deviceName = deviceName,
+                                connectedAt = connectedAt,
+                                lastSeen = lastSeen,
+                                activeSecondsAgo = (now - lastSeen) / 1000L
+                            )
+                        )
+                    }
+                }
+                onClientsUpdated(list)
+            }
+    }
+
+    fun stopListeningForClients() {
+        clientsListener?.remove()
+        clientsListener = null
     }
 
     fun updateRequestStatus(requestId: String, status: String, decision: String? = null) {

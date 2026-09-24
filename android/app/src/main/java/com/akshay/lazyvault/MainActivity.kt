@@ -150,11 +150,17 @@ class MainActivity : AppCompatActivity() {
         firebaseVaultManager.startListeningForRequests { _, _, _ ->
             refreshAuditLog()
         }
+        firebaseVaultManager.startListeningForClients { clients ->
+            runOnUiThread {
+                renderConnectedClients(clients)
+            }
+        }
     }
 
     override fun onPause() {
         super.onPause()
         livePollJob?.cancel()
+        firebaseVaultManager.stopListeningForClients()
     }
 
     override fun onDestroy() {
@@ -751,14 +757,14 @@ class MainActivity : AppCompatActivity() {
 
     private fun renderConnectedClients(clients: List<ConnectedClient>) {
         val count = clients.size
-        binding.contentMain.textConnectedCountBadge.text = if (count == 1) "1 ONLINE" else "$count ONLINE"
+        binding.contentMain.textConnectedCountBadge.text = if (count == 1) "1 Online" else "$count Online"
 
         val container = binding.contentMain.containerConnectedClients
         container.removeAllViews()
 
         if (clients.isEmpty()) {
             val empty = TextView(this).apply {
-                text = "No clients currently connected. Open your share link in a browser to see it appear here live."
+                text = "No clients currently active. Open your link in a browser to connect."
                 setTextColor(Color.parseColor("#64748B"))
                 textSize = 12f
             }
@@ -772,19 +778,19 @@ class MainActivity : AppCompatActivity() {
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.WRAP_CONTENT
                 ).apply {
-                    bottomMargin = 10
+                    bottomMargin = 8
                 }
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
-                setBackgroundColor(Color.parseColor("#0F172A"))
-                setPadding(20, 14, 20, 14)
+                setBackgroundColor(Color.parseColor("#0F1522"))
+                setPadding(16, 12, 16, 12)
             }
 
             val dot = TextView(this).apply {
                 text = "●"
-                setTextColor(Color.parseColor("#34D399"))
-                textSize = 16f
-                setPadding(0, 0, 16, 0)
+                setTextColor(Color.parseColor("#10B981"))
+                textSize = 14f
+                setPadding(0, 0, 14, 0)
             }
 
             val details = LinearLayout(this).apply {
@@ -865,11 +871,11 @@ class MainActivity : AppCompatActivity() {
 
     private fun formatExpiryBadge(seconds: Long): String {
         return when (seconds) {
-            3600L -> "EXP: 1H"
-            86400L -> "EXP: 24H"
-            604800L -> "EXP: 7D"
-            0L -> "EXP: NEVER"
-            else -> "EXP: ${seconds / 3600}H"
+            3600L -> "Expires: 1h"
+            86400L -> "Expires: 24h"
+            604800L -> "Expires: 7d"
+            0L -> "No expiration"
+            else -> "Expires: ${seconds / 3600}h"
         }
     }
 
@@ -878,7 +884,7 @@ class MainActivity : AppCompatActivity() {
             3600L -> "1 Hour"
             86400L -> "24 Hours"
             604800L -> "7 Days"
-            0L -> "Permanent"
+            0L -> "No Expiration"
             else -> "${seconds / 3600} Hours"
         }
     }

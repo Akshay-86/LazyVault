@@ -1,5 +1,14 @@
-import React from 'react';
-import { ShieldCheck, HardDrive, RefreshCw, Smartphone, Key, Lock, Clock } from 'lucide-react';
+import React, { useState } from 'react';
+import {
+  Shield,
+  HardDrive,
+  RefreshCw,
+  Smartphone,
+  Lock,
+  Clock,
+  Copy,
+  Check,
+} from 'lucide-react';
 
 interface HeaderProps {
   vaultId?: string | null;
@@ -21,13 +30,14 @@ export const Header: React.FC<HeaderProps> = ({
   itemCount,
   totalSizeBytes,
   rootHash,
-  lastUpdated,
   expiresAt,
   hasPassword,
   isLoading,
   onRefresh,
   onLock,
 }) => {
+  const [copiedVaultId, setCopiedVaultId] = useState(false);
+
   const formatBytes = (bytes: number) => {
     if (bytes === 0) return '0 B';
     const k = 1024;
@@ -48,93 +58,110 @@ export const Header: React.FC<HeaderProps> = ({
     return `${hours}h ${mins}m left`;
   };
 
+  const copyVaultId = () => {
+    if (!vaultId) return;
+    navigator.clipboard.writeText(vaultId);
+    setCopiedVaultId(true);
+    setTimeout(() => setCopiedVaultId(false), 2000);
+  };
+
   return (
-    <header className="border-b border-slate-800 bg-[#0b1120] px-6 py-4">
+    <header className="border-b border-slate-800/80 bg-[#0d131f]/90 backdrop-blur-md sticky top-0 z-40 px-6 py-3.5 transition-colors">
       <div className="max-w-7xl mx-auto flex flex-col md:flex-row md:items-center md:justify-between gap-4">
         {/* Brand */}
         <div className="flex items-center space-x-3">
-          <div className="h-10 w-10 rounded-xl bg-gradient-to-br from-cyan-500 to-blue-600 flex items-center justify-center shadow-lg shadow-cyan-500/20">
-            <ShieldCheck className="h-6 w-6 text-white" />
+          <div className="h-9 w-9 rounded-lg bg-blue-600 flex items-center justify-center shadow-sm text-white font-semibold">
+            <Shield className="h-5 w-5" />
           </div>
           <div>
-            <div className="flex items-center space-x-2">
-              <h1 className="text-xl font-bold tracking-tight text-white">LazyVault</h1>
-              <span className="px-2 py-0.5 text-xs font-semibold bg-cyan-950 text-cyan-400 border border-cyan-800 rounded-full">
-                Zero-Trust Dormant Node
+            <div className="flex items-center space-x-2.5">
+              <h1 className="text-base font-semibold text-white tracking-tight">LazyVault</h1>
+              <span className="px-2 py-0.5 text-[11px] font-medium bg-slate-800 text-slate-300 border border-slate-700/60 rounded-full">
+                Peer-to-Peer
               </span>
             </div>
             <p className="text-xs text-slate-400">
-              Asynchronously leased on-demand storage • Zero persistent blobs on cloud
+              Direct device-to-browser transfers • No cloud storage
             </p>
           </div>
         </div>
 
         {/* Stats & Actions */}
-        <div className="flex flex-wrap items-center gap-3">
+        <div className="flex flex-wrap items-center gap-2.5">
           {/* Vault ID */}
           {vaultId && (
-            <div className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-cyan-950/80 border border-cyan-700/70 text-xs">
-              <span className="text-cyan-400 font-semibold">Vault:</span>
-              <span className="font-mono text-cyan-200 font-medium">{vaultId}</span>
-            </div>
+            <button
+              onClick={copyVaultId}
+              title="Click to copy Vault ID"
+              className="flex items-center space-x-1.5 px-2.5 py-1.5 rounded-lg bg-slate-900 border border-slate-800 hover:border-slate-700 text-xs transition group"
+            >
+              <span className="text-slate-400">Vault:</span>
+              <span className="font-mono text-slate-200 font-medium">{vaultId}</span>
+              {copiedVaultId ? (
+                <Check className="h-3.5 w-3.5 text-emerald-400 ml-1" />
+              ) : (
+                <Copy className="h-3.5 w-3.5 text-slate-500 group-hover:text-slate-300 ml-1 transition" />
+              )}
+            </button>
           )}
 
-          {/* Node Status */}
-          <div className="flex items-center space-x-2 px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-800 text-xs">
-            <Smartphone className="h-4 w-4 text-emerald-400" />
-            <span className="text-slate-400">Node:</span>
-            <span className="font-mono font-medium text-slate-200">
-              {deviceId ? deviceId.slice(0, 12) + '...' : 'Dormant (Waiting)'}
+          {/* Device Status */}
+          <div className="flex items-center space-x-2 px-2.5 py-1.5 rounded-lg bg-slate-900 border border-slate-800 text-xs">
+            <span className="relative flex h-2 w-2">
+              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+              <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+            </span>
+            <span className="text-slate-300 font-medium">
+              {deviceId ? deviceId.slice(0, 14) : 'Device Ready'}
             </span>
           </div>
 
           {/* Files & Size */}
-          <div className="flex items-center space-x-2 px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-800 text-xs">
-            <HardDrive className="h-4 w-4 text-cyan-400" />
-            <span className="text-slate-400">Catalog:</span>
-            <span className="font-semibold text-slate-200">{itemCount} files</span>
+          <div className="flex items-center space-x-1.5 px-2.5 py-1.5 rounded-lg bg-slate-900 border border-slate-800 text-xs text-slate-300">
+            <HardDrive className="h-3.5 w-3.5 text-slate-400" />
+            <span className="font-medium text-slate-200">{itemCount}</span>
+            <span className="text-slate-400">files</span>
             <span className="text-slate-500">({formatBytes(totalSizeBytes)})</span>
           </div>
 
-          {/* Merkle Root */}
-          {rootHash && (
-            <div className="hidden lg:flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-800 text-xs">
-              <Key className="h-3.5 w-3.5 text-amber-400" />
-              <span className="text-slate-400">Root:</span>
-              <span className="font-mono text-amber-300/90">{rootHash.slice(0, 10)}...</span>
-            </div>
-          )}
-
           {/* Expiration Timer */}
           {expiresAt && (
-            <div className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-800 text-xs">
-              <Clock className="h-3.5 w-3.5 text-cyan-400" />
-              <span className="text-slate-400">TTL:</span>
-              <span className="font-mono text-cyan-300 font-medium">{formatExpiry(expiresAt)}</span>
+            <div className="flex items-center space-x-1.5 px-2.5 py-1.5 rounded-lg bg-slate-900 border border-slate-800 text-xs text-slate-300">
+              <Clock className="h-3.5 w-3.5 text-slate-400" />
+              <span className="text-slate-400">Expires:</span>
+              <span className="font-medium text-slate-200">{formatExpiry(expiresAt)}</span>
             </div>
           )}
 
-          {/* Refresh Button */}
-          <button
-            onClick={onRefresh}
-            disabled={isLoading}
-            className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-cyan-600/20 hover:bg-cyan-600/30 border border-cyan-500/40 text-cyan-300 text-xs font-medium transition disabled:opacity-50"
-          >
-            <RefreshCw className={`h-3.5 w-3.5 ${isLoading ? 'animate-spin' : ''}`} />
-            <span>Sync</span>
-          </button>
+          {/* Protected Indicator */}
+          {hasPassword && (
+            <div className="flex items-center space-x-1.5 px-2.5 py-1.5 rounded-lg bg-slate-900 border border-slate-800 text-xs text-slate-300">
+              <Lock className="h-3.5 w-3.5 text-slate-400" />
+              <span className="text-slate-400">Passcode Protected</span>
+            </div>
+          )}
 
-          {/* Lock Vault Button */}
+          {/* Lock Action (if authenticated) */}
           {hasPassword && onLock && (
             <button
               onClick={onLock}
-              title="Lock Vault (Require passcode again)"
-              className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-amber-950/40 hover:bg-amber-900/50 border border-amber-700/60 text-amber-300 text-xs font-medium transition"
+              title="Lock Vault"
+              className="p-1.5 rounded-lg bg-slate-900 border border-slate-800 text-slate-400 hover:text-white hover:bg-slate-800 transition"
             >
-              <Lock className="h-3.5 w-3.5 text-amber-400" />
-              <span>Lock</span>
+              <Lock className="h-4 w-4" />
             </button>
           )}
+
+          {/* Refresh Action */}
+          <button
+            onClick={onRefresh}
+            disabled={isLoading}
+            title="Refresh Catalog"
+            className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 active:bg-slate-600 text-slate-200 text-xs font-medium transition disabled:opacity-50"
+          >
+            <RefreshCw className={`h-3.5 w-3.5 ${isLoading ? 'animate-spin' : ''}`} />
+            <span>Refresh</span>
+          </button>
         </div>
       </div>
     </header>

@@ -5,12 +5,15 @@
     android:id="@+id/main"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
+    android:background="@color/vault_bg"
     android:fitsSystemWindows="true"
     tools:context=".MainActivity">
 
     <com.google.android.material.appbar.AppBarLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
+        android:background="@color/vault_surface"
+        app:elevation="1dp"
         android:fitsSystemWindows="true">
 
         <com.google.android.material.appbar.MaterialToolbar
@@ -19,7 +22,7 @@
             android:layout_height="?attr/actionBarSize"
             app:logo="@drawable/ic_lazyvault_logo_24"
             app:title="  LazyVault"
-            app:titleTextColor="#F8FAFC" />
+            app:titleTextColor="@color/vault_text_primary" />
 
     </com.google.android.material.appbar.AppBarLayout>
 

@@ -5,7 +5,7 @@
     android:id="@+id/nestedScrollMain"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="#0A0D14"
+    android:background="@color/vault_bg"
     app:layout_behavior="@string/appbar_scrolling_view_behavior"
     tools:context=".MainActivity">
 
@@ -20,11 +20,11 @@
             android:id="@+id/cardIndexingState"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginBottom="16dp"
+            android:layout_marginBottom="14dp"
             android:visibility="gone"
-            app:cardBackgroundColor="#1E1B4B"
-            app:cardCornerRadius="16dp"
-            app:strokeColor="#4F46E5"
+            app:cardBackgroundColor="@color/vault_surface_card"
+            app:cardCornerRadius="14dp"
+            app:strokeColor="@color/vault_primary"
             app:strokeWidth="1dp">
 
             <LinearLayout
@@ -32,13 +32,13 @@
                 android:layout_height="wrap_content"
                 android:gravity="center_vertical"
                 android:orientation="horizontal"
-                android:padding="16dp">
+                android:padding="14dp">
 
                 <ProgressBar
-                    android:layout_width="24dp"
-                    android:layout_height="24dp"
+                    android:layout_width="20dp"
+                    android:layout_height="20dp"
                     android:indeterminate="true"
-                    android:indeterminateTint="#818CF8" />
+                    android:indeterminateTint="@color/vault_primary_light" />
 
                 <TextView
                     android:id="@+id/textIndexingStatus"
@@ -46,8 +46,8 @@
                     android:layout_height="wrap_content"
                     android:layout_marginStart="12dp"
                     android:fontFamily="sans-serif-medium"
-                    android:text="Scanning &amp; Indexing local files..."
-                    android:textColor="#E0E7FF"
+                    android:text="Indexing folder contents..."
+                    android:textColor="@color/vault_text_primary"
                     android:textSize="13sp" />
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
@@ -57,11 +57,11 @@
             android:id="@+id/cardIncomingRequest"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginBottom="16dp"
+            android:layout_marginBottom="14dp"
             android:visibility="gone"
-            app:cardBackgroundColor="#1A0B2E"
-            app:cardCornerRadius="16dp"
-            app:strokeColor="#A855F7"
+            app:cardBackgroundColor="@color/vault_surface_card"
+            app:cardCornerRadius="14dp"
+            app:strokeColor="@color/vault_warning"
             app:strokeWidth="1.5dp">
 
             <LinearLayout
@@ -80,23 +80,23 @@
                         android:layout_width="0dp"
                         android:layout_height="wrap_content"
                         android:layout_weight="1"
-                        android:fontFamily="monospace"
-                        android:text="⚠️ INCOMING ACCESS REQUEST"
-                        android:textColor="#E879F9"
-                        android:textSize="11sp"
+                        android:fontFamily="sans-serif-medium"
+                        android:text="Incoming Transfer Request"
+                        android:textColor="@color/vault_warning"
+                        android:textSize="12sp"
                         android:textStyle="bold" />
 
                     <TextView
                         android:id="@+id/textRequestTimer"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:background="#581C87"
+                        android:background="@color/vault_surface_subtle"
                         android:fontFamily="monospace"
-                        android:paddingHorizontal="6dp"
-                        android:paddingVertical="2dp"
+                        android:paddingHorizontal="8dp"
+                        android:paddingVertical="3dp"
                         android:text="60s"
-                        android:textColor="#F5D0FE"
-                        android:textSize="10sp"
+                        android:textColor="@color/vault_text_primary"
+                        android:textSize="11sp"
                         android:textStyle="bold" />
                 </LinearLayout>
 
@@ -105,11 +105,10 @@
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="8dp"
-                    android:fontFamily="monospace"
-                    android:text="financial_report_2026.pdf"
-                    android:textColor="#F8FAFC"
-                    android:textSize="14sp"
-                    android:textStyle="bold" />
+                    android:fontFamily="sans-serif-medium"
+                    android:text="file.pdf"
+                    android:textColor="@color/vault_text_primary"
+                    android:textSize="14sp" />
 
                 <TextView
                     android:id="@+id/textIncomingRequester"
@@ -117,8 +116,8 @@
                     android:layout_height="wrap_content"
                     android:layout_marginTop="2dp"
                     android:fontFamily="sans-serif"
-                    android:text="Requester: Web Client"
-                    android:textColor="#CBD5E1"
+                    android:text="Requester: Web Browser"
+                    android:textColor="@color/vault_text_secondary"
                     android:textSize="12sp" />
 
                 <LinearLayout
@@ -129,14 +128,15 @@
 
                     <Button
                         android:id="@+id/btnDenyIncoming"
+                        style="@style/Widget.Material3.Button.TonalButton"
                         android:layout_width="0dp"
                         android:layout_height="wrap_content"
                         android:layout_marginEnd="6dp"
                         android:layout_weight="1"
-                        android:backgroundTint="#7F1D1D"
-                        android:text="DENY"
-                        android:textColor="#FCA5A5"
-                        android:textStyle="bold" />
+                        android:backgroundTint="@color/vault_surface_stroke"
+                        android:text="Decline"
+                        android:textColor="@color/vault_danger"
+                        android:textSize="13sp" />
 
                     <Button
                         android:id="@+id/btnAllowIncoming"
@@ -144,9 +144,10 @@
                         android:layout_height="wrap_content"
                         android:layout_marginStart="6dp"
                         android:layout_weight="1"
-                        android:backgroundTint="#059669"
-                        android:text="ALLOW &amp; STREAM"
+                        android:backgroundTint="@color/vault_primary"
+                        android:text="Allow"
                         android:textColor="#FFFFFF"
+                        android:textSize="13sp"
                         android:textStyle="bold" />
                 </LinearLayout>
             </LinearLayout>
@@ -156,11 +157,11 @@
         <com.google.android.material.card.MaterialCardView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginBottom="16dp"
-            app:cardBackgroundColor="#121824"
-            app:cardCornerRadius="16dp"
-            app:strokeColor="#0284C7"
-            app:strokeWidth="1.5dp">
+            android:layout_marginBottom="14dp"
+            app:cardBackgroundColor="@color/vault_surface_card"
+            app:cardCornerRadius="14dp"
+            app:strokeColor="@color/vault_surface_stroke"
+            app:strokeWidth="1dp">
 
             <LinearLayout
                 android:layout_width="match_parent"
@@ -178,44 +179,42 @@
                         android:layout_width="0dp"
                         android:layout_height="wrap_content"
                         android:layout_weight="1"
-                        android:fontFamily="monospace"
-                        android:text="YOUR VAULT SHARE LINK"
-                        android:textColor="#38BDF8"
-                        android:textSize="11sp"
+                        android:fontFamily="sans-serif-medium"
+                        android:text="Vault Sharing"
+                        android:textColor="@color/vault_text_primary"
+                        android:textSize="13sp"
                         android:textStyle="bold" />
 
                     <TextView
                         android:id="@+id/textLinkExpiryBadge"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:background="#1E293B"
-                        android:fontFamily="monospace"
-                        android:paddingHorizontal="6dp"
-                        android:paddingVertical="2dp"
-                        android:text="EXP: 24H"
-                        android:textColor="#94A3B8"
-                        android:textSize="10sp" />
+                        android:background="@color/vault_surface_subtle"
+                        android:paddingHorizontal="8dp"
+                        android:paddingVertical="3dp"
+                        android:text="Expires: 24h"
+                        android:textColor="@color/vault_text_secondary"
+                        android:textSize="11sp" />
                 </LinearLayout>
 
                 <TextView
                     android:id="@+id/textShareLink"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="8dp"
-                    android:background="#0F172A"
+                    android:layout_marginTop="10dp"
+                    android:background="@color/vault_surface_subtle"
                     android:fontFamily="monospace"
                     android:padding="12dp"
                     android:text="Generating link..."
-                    android:textColor="#F8FAFC"
-                    android:textSize="12sp"
-                    android:textStyle="bold" />
+                    android:textColor="@color/vault_text_primary"
+                    android:textSize="12sp" />
 
                 <TextView
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="6dp"
-                    android:text="Open on any laptop, tablet, or browser on LAN/WAN. Access is gated by your vault passcode."
-                    android:textColor="#94A3B8"
+                    android:text="Open on any browser to download files directly from your phone."
+                    android:textColor="@color/vault_text_secondary"
                     android:textSize="12sp" />
 
                 <!-- Action Buttons: Copy, Share, QR Code -->
@@ -231,32 +230,34 @@
                         android:layout_height="wrap_content"
                         android:layout_marginEnd="4dp"
                         android:layout_weight="1"
-                        android:backgroundTint="#38BDF8"
+                        android:backgroundTint="@color/vault_primary"
                         android:text="Copy Link"
-                        android:textColor="#0A0D14"
+                        android:textColor="#FFFFFF"
                         android:textSize="12sp"
                         android:textStyle="bold" />
 
                     <Button
                         android:id="@+id/btnShareLink"
+                        style="@style/Widget.Material3.Button.TonalButton"
                         android:layout_width="0dp"
                         android:layout_height="wrap_content"
                         android:layout_marginHorizontal="4dp"
                         android:layout_weight="1"
-                        android:backgroundTint="#1E293B"
-                        android:text="Share..."
-                        android:textColor="#F8FAFC"
+                        android:backgroundTint="@color/vault_surface_stroke"
+                        android:text="Share"
+                        android:textColor="@color/vault_text_primary"
                         android:textSize="12sp" />
 
                     <Button
                         android:id="@+id/btnShowQr"
+                        style="@style/Widget.Material3.Button.TonalButton"
                         android:layout_width="0dp"
                         android:layout_height="wrap_content"
                         android:layout_marginStart="4dp"
                         android:layout_weight="1"
-                        android:backgroundTint="#1E293B"
+                        android:backgroundTint="@color/vault_surface_stroke"
                         android:text="QR Code"
-                        android:textColor="#F8FAFC"
+                        android:textColor="@color/vault_text_primary"
                         android:textSize="12sp" />
                 </LinearLayout>
             </LinearLayout>
@@ -267,10 +268,10 @@
             android:id="@+id/cardConnectedClients"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginBottom="16dp"
-            app:cardBackgroundColor="#121824"
-            app:cardCornerRadius="16dp"
-            app:strokeColor="#10B981"
+            android:layout_marginBottom="14dp"
+            app:cardBackgroundColor="@color/vault_surface_card"
+            app:cardCornerRadius="14dp"
+            app:strokeColor="@color/vault_surface_stroke"
             app:strokeWidth="1dp">
 
             <LinearLayout
@@ -289,24 +290,22 @@
                         android:layout_width="0dp"
                         android:layout_height="wrap_content"
                         android:layout_weight="1"
-                        android:fontFamily="monospace"
-                        android:text="CONNECTED DEVICES (WEB / CI)"
-                        android:textColor="#34D399"
-                        android:textSize="11sp"
+                        android:fontFamily="sans-serif-medium"
+                        android:text="Connected Devices"
+                        android:textColor="@color/vault_text_primary"
+                        android:textSize="13sp"
                         android:textStyle="bold" />
 
                     <TextView
                         android:id="@+id/textConnectedCountBadge"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:background="#064E3B"
-                        android:fontFamily="monospace"
+                        android:background="@color/vault_surface_subtle"
                         android:paddingHorizontal="8dp"
                         android:paddingVertical="3dp"
-                        android:text="0 ONLINE"
-                        android:textColor="#34D399"
-                        android:textSize="10sp"
-                        android:textStyle="bold" />
+                        android:text="0 Online"
+                        android:textColor="@color/vault_text_secondary"
+                        android:textSize="11sp" />
                 </LinearLayout>
 
                 <!-- Dynamic container for connected client items -->
@@ -314,7 +313,7 @@
                     android:id="@+id/containerConnectedClients"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="10dp"
+                    android:layout_marginTop="8dp"
                     android:orientation="vertical">
 
                     <TextView
@@ -322,8 +321,8 @@
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:fontFamily="sans-serif"
-                        android:text="No clients currently connected. Open your share link in a browser to see it appear here live."
-                        android:textColor="#64748B"
+                        android:text="No clients currently active. Open your link in a browser to connect."
+                        android:textColor="@color/vault_text_muted"
                         android:textSize="12sp" />
                 </LinearLayout>
             </LinearLayout>
@@ -333,10 +332,10 @@
         <com.google.android.material.card.MaterialCardView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginBottom="16dp"
-            app:cardBackgroundColor="#121824"
-            app:cardCornerRadius="16dp"
-            app:strokeColor="#222F47"
+            android:layout_marginBottom="14dp"
+            app:cardBackgroundColor="@color/vault_surface_card"
+            app:cardCornerRadius="14dp"
+            app:strokeColor="@color/vault_surface_stroke"
             app:strokeWidth="1dp">
 
             <LinearLayout
@@ -348,10 +347,10 @@
                 <TextView
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:fontFamily="monospace"
-                    android:text="VAULT PASSCODE &amp; LINK EXPIRATION"
-                    android:textColor="#94A3B8"
-                    android:textSize="11sp"
+                    android:fontFamily="sans-serif-medium"
+                    android:text="Vault Security"
+                    android:textColor="@color/vault_text_primary"
+                    android:textSize="13sp"
                     android:textStyle="bold" />
 
                 <!-- Passcode row -->
@@ -366,22 +365,21 @@
                         android:layout_width="0dp"
                         android:layout_height="wrap_content"
                         android:layout_weight="1"
-                        android:text="Current Passcode:"
-                        android:textColor="#CBD5E1"
+                        android:text="Passcode Protection:"
+                        android:textColor="@color/vault_text_secondary"
                         android:textSize="13sp" />
 
                     <TextView
                         android:id="@+id/textCurrentPassword"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:background="#1E293B"
+                        android:background="@color/vault_surface_subtle"
                         android:fontFamily="monospace"
                         android:paddingHorizontal="10dp"
                         android:paddingVertical="4dp"
                         android:text="vault123"
-                        android:textColor="#38BDF8"
-                        android:textSize="13sp"
-                        android:textStyle="bold" />
+                        android:textColor="@color/vault_text_primary"
+                        android:textSize="12sp" />
 
                     <Button
                         android:id="@+id/btnChangePassword"
@@ -390,7 +388,7 @@
                         android:layout_height="wrap_content"
                         android:layout_marginStart="4dp"
                         android:text="Change"
-                        android:textColor="#38BDF8"
+                        android:textColor="@color/vault_primary_light"
                         android:textSize="12sp" />
                 </LinearLayout>
 
@@ -398,7 +396,7 @@
                 <LinearLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="6dp"
+                    android:layout_marginTop="4dp"
                     android:gravity="center_vertical"
                     android:orientation="horizontal">
 
@@ -406,8 +404,8 @@
                         android:layout_width="0dp"
                         android:layout_height="wrap_content"
                         android:layout_weight="1"
-                        android:text="Expiration Policy:"
-                        android:textColor="#CBD5E1"
+                        android:text="Link Expiration:"
+                        android:textColor="@color/vault_text_secondary"
                         android:textSize="13sp" />
 
                     <Button
@@ -416,31 +414,32 @@
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:text="24 Hours"
-                        android:textColor="#F8FAFC"
+                        android:textColor="@color/vault_text_primary"
                         android:textSize="12sp" />
                 </LinearLayout>
 
                 <!-- Revoke / Regenerate Link Button -->
                 <Button
                     android:id="@+id/btnRegenerateLink"
+                    style="@style/Widget.Material3.Button.TonalButton"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="10dp"
-                    android:backgroundTint="#334155"
+                    android:backgroundTint="@color/vault_surface_stroke"
                     android:text="Revoke &amp; Generate New Link"
-                    android:textColor="#F8FAFC"
+                    android:textColor="@color/vault_text_primary"
                     android:textSize="12sp" />
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 
-        <!-- INDEXED FILES & CI/CD ENDPOINT SHARING -->
+        <!-- INDEXED FILES & FOLDER CARD -->
         <com.google.android.material.card.MaterialCardView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginBottom="16dp"
-            app:cardBackgroundColor="#121824"
-            app:cardCornerRadius="16dp"
-            app:strokeColor="#222F47"
+            android:layout_marginBottom="14dp"
+            app:cardBackgroundColor="@color/vault_surface_card"
+            app:cardCornerRadius="14dp"
+            app:strokeColor="@color/vault_surface_stroke"
             app:strokeWidth="1dp">
 
             <LinearLayout
@@ -460,10 +459,10 @@
                         android:layout_width="0dp"
                         android:layout_height="wrap_content"
                         android:layout_weight="1"
-                        android:fontFamily="monospace"
-                        android:text="INDEXED FILES (TAP FOR CI/CD LINK)"
-                        android:textColor="#94A3B8"
-                        android:textSize="11sp"
+                        android:fontFamily="sans-serif-medium"
+                        android:text="Vault Files"
+                        android:textColor="@color/vault_text_primary"
+                        android:textSize="13sp"
                         android:textStyle="bold" />
 
                     <Button
@@ -471,20 +470,19 @@
                         style="@style/Widget.Material3.Button.TonalButton"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:layout_marginEnd="6dp"
-                        android:backgroundTint="#0369A1"
-                        android:text="📁 Pick Folder"
+                        android:layout_marginEnd="4dp"
+                        android:backgroundTint="@color/vault_primary"
+                        android:text="Choose Folder"
                         android:textColor="#FFFFFF"
-                        android:textSize="11sp"
-                        android:textStyle="bold" />
+                        android:textSize="11sp" />
 
                     <Button
                         android:id="@+id/btnSyncCatalog"
                         style="@style/Widget.Material3.Button.TextButton"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:text="Re-Index"
-                        android:textColor="#38BDF8"
+                        android:text="Sync"
+                        android:textColor="@color/vault_primary_light"
                         android:textSize="11sp" />
                 </LinearLayout>
 
@@ -494,17 +492,11 @@
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="8dp"
-                    android:background="#0F172A"
+                    android:background="@color/vault_surface_subtle"
                     android:gravity="center_vertical"
                     android:orientation="horizontal"
                     android:paddingHorizontal="12dp"
                     android:paddingVertical="4dp">
-
-                    <TextView
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:text="📂 "
-                        android:textSize="12sp" />
 
                     <TextView
                         android:id="@+id/textCurrentFolder"
@@ -512,11 +504,11 @@
                         android:layout_height="wrap_content"
                         android:layout_weight="1"
                         android:ellipsize="middle"
-                        android:fontFamily="monospace"
+                        android:fontFamily="sans-serif"
                         android:singleLine="true"
                         android:text="Folder: Default App Vault"
-                        android:textColor="#38BDF8"
-                        android:textSize="11sp" />
+                        android:textColor="@color/vault_text_secondary"
+                        android:textSize="12sp" />
 
                     <Button
                         android:id="@+id/btnResetFolder"
@@ -526,8 +518,8 @@
                         android:minWidth="0dp"
                         android:paddingHorizontal="8dp"
                         android:text="Reset"
-                        android:textColor="#94A3B8"
-                        android:textSize="10sp" />
+                        android:textColor="@color/vault_text_muted"
+                        android:textSize="11sp" />
                 </LinearLayout>
 
                 <!-- Quick Filter / Search Bar (visible if files exist) -->
@@ -537,12 +529,12 @@
                     android:layout_height="wrap_content"
                     android:layout_marginTop="8dp"
                     android:visibility="gone"
-                    app:boxBackgroundColor="#0B0F19"
+                    app:boxBackgroundColor="@color/vault_surface_subtle"
                     app:boxCornerRadiusBottomEnd="8dp"
                     app:boxCornerRadiusBottomStart="8dp"
                     app:boxCornerRadiusTopEnd="8dp"
                     app:boxCornerRadiusTopStart="8dp"
-                    app:boxStrokeColor="#38BDF8"
+                    app:boxStrokeColor="@color/vault_primary"
                     app:boxStrokeWidth="1dp"
                     app:hintEnabled="false">
 
@@ -552,12 +544,12 @@
                         android:layout_height="wrap_content"
                         android:background="@null"
                         android:fontFamily="sans-serif"
-                        android:hint="🔍 Filter indexed files..."
+                        android:hint="Filter files..."
                         android:inputType="text"
                         android:paddingHorizontal="12dp"
                         android:paddingVertical="8dp"
-                        android:textColor="#F8FAFC"
-                        android:textColorHint="#64748B"
+                        android:textColor="@color/vault_text_primary"
+                        android:textColorHint="@color/vault_text_muted"
                         android:textSize="12sp" />
                 </com.google.android.material.textfield.TextInputLayout>
 
@@ -569,8 +561,8 @@
                     android:layout_marginTop="12dp"
                     android:gravity="center"
                     android:paddingVertical="16dp"
-                    android:text="No files indexed in this folder yet."
-                    android:textColor="#64748B"
+                    android:text="No files indexed yet. Tap Choose Folder."
+                    android:textColor="@color/vault_text_muted"
                     android:textSize="13sp"
                     android:visibility="gone" />
 
@@ -590,10 +582,10 @@
         <com.google.android.material.card.MaterialCardView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginBottom="16dp"
-            app:cardBackgroundColor="#121824"
-            app:cardCornerRadius="16dp"
-            app:strokeColor="#222F47"
+            android:layout_marginBottom="14dp"
+            app:cardBackgroundColor="@color/vault_surface_card"
+            app:cardCornerRadius="14dp"
+            app:strokeColor="@color/vault_surface_stroke"
             app:strokeWidth="1dp">
 
             <LinearLayout
@@ -605,39 +597,40 @@
                 <TextView
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:fontFamily="monospace"
-                    android:text="BROKER CONNECTION"
-                    android:textColor="#94A3B8"
-                    android:textSize="11sp"
+                    android:fontFamily="sans-serif-medium"
+                    android:text="Custom Broker (Optional)"
+                    android:textColor="@color/vault_text_primary"
+                    android:textSize="13sp"
                     android:textStyle="bold" />
 
                 <com.google.android.material.textfield.TextInputLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="8dp"
-                    app:boxBackgroundColor="#182030"
-                    app:boxStrokeColor="#38BDF8"
-                    app:hintTextColor="#38BDF8">
+                    app:boxBackgroundColor="@color/vault_surface_subtle"
+                    app:boxStrokeColor="@color/vault_primary"
+                    app:hintTextColor="@color/vault_primary_light">
 
                     <com.google.android.material.textfield.TextInputEditText
                         android:id="@+id/editBackendUrl"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:fontFamily="monospace"
-                        android:hint="Broker URL (http://10.0.2.2:4000)"
+                        android:fontFamily="sans-serif"
+                        android:hint="Broker URL (optional)"
                         android:inputType="textUri"
-                        android:textColor="#F8FAFC"
+                        android:textColor="@color/vault_text_primary"
                         android:textSize="13sp" />
                 </com.google.android.material.textfield.TextInputLayout>
 
                 <Button
                     android:id="@+id/btnSaveBroker"
+                    style="@style/Widget.Material3.Button.TonalButton"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="10dp"
-                    android:backgroundTint="#1E293B"
-                    android:text="Update Broker &amp; Reconnect"
-                    android:textColor="#F8FAFC"
+                    android:backgroundTint="@color/vault_surface_stroke"
+                    android:text="Update Broker"
+                    android:textColor="@color/vault_text_primary"
                     android:textSize="12sp" />
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
@@ -646,10 +639,10 @@
         <com.google.android.material.card.MaterialCardView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginBottom="16dp"
-            app:cardBackgroundColor="#121824"
-            app:cardCornerRadius="16dp"
-            app:strokeColor="#222F47"
+            android:layout_marginBottom="14dp"
+            app:cardBackgroundColor="@color/vault_surface_card"
+            app:cardCornerRadius="14dp"
+            app:strokeColor="@color/vault_surface_stroke"
             app:strokeWidth="1dp">
 
             <LinearLayout
@@ -661,21 +654,22 @@
                 <TextView
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:fontFamily="monospace"
-                    android:text="DEV TESTING"
-                    android:textColor="#F59E0B"
-                    android:textSize="11sp"
+                    android:fontFamily="sans-serif-medium"
+                    android:text="Developer Diagnostics"
+                    android:textColor="@color/vault_text_primary"
+                    android:textSize="13sp"
                     android:textStyle="bold" />
 
                 <Button
                     android:id="@+id/btnSimulateRequest"
+                    style="@style/Widget.Material3.Button.TonalButton"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="8dp"
-                    android:backgroundTint="#F59E0B"
-                    android:text="Simulate Incoming FCM Request"
-                    android:textColor="#0A0D14"
-                    android:textStyle="bold" />
+                    android:backgroundTint="@color/vault_surface_stroke"
+                    android:text="Simulate Transfer Request"
+                    android:textColor="@color/vault_text_primary"
+                    android:textSize="12sp" />
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 
@@ -683,9 +677,9 @@
         <com.google.android.material.card.MaterialCardView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            app:cardBackgroundColor="#121824"
-            app:cardCornerRadius="16dp"
-            app:strokeColor="#222F47"
+            app:cardBackgroundColor="@color/vault_surface_card"
+            app:cardCornerRadius="14dp"
+            app:strokeColor="@color/vault_surface_stroke"
             app:strokeWidth="1dp">
 
             <LinearLayout
@@ -697,10 +691,10 @@
                 <TextView
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:fontFamily="monospace"
-                    android:text="TRANSFER AUDIT LOG"
-                    android:textColor="#94A3B8"
-                    android:textSize="11sp"
+                    android:fontFamily="sans-serif-medium"
+                    android:text="Transfer History"
+                    android:textColor="@color/vault_text_primary"
+                    android:textSize="13sp"
                     android:textStyle="bold" />
 
                 <TextView
@@ -708,10 +702,10 @@
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="8dp"
-                    android:fontFamily="monospace"
-                    android:text="No recent transfer leases recorded."
-                    android:textColor="#CBD5E1"
-                    android:textSize="11sp" />
+                    android:fontFamily="sans-serif"
+                    android:text="No recent transfer requests."
+                    android:textColor="@color/vault_text_secondary"
+                    android:textSize="12sp" />
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 

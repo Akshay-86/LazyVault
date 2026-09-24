@@ -582,126 +582,110 @@ function sha256Bytes(bytes: Uint8Array): string {
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-200">
-      <div className="w-full max-w-lg bg-[#0f172a] border border-slate-700/80 rounded-2xl shadow-2xl overflow-hidden">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm animate-in fade-in duration-200">
+      <div className="w-full max-w-md bg-[#111726] border border-slate-800 rounded-2xl shadow-2xl overflow-hidden">
         {/* Modal Header */}
-        <div className="px-6 py-4 border-b border-slate-800 flex items-center justify-between bg-[#0b1120]">
-          <div className="flex items-center space-x-2">
-            <Radio className="h-5 w-5 text-cyan-400 animate-pulse" />
-            <h2 className="text-base font-bold text-slate-100">Zero-Trust Retrieval Pipeline</h2>
-          </div>
+        <div className="px-5 py-3.5 border-b border-slate-800 flex items-center justify-between bg-[#0d131f]">
+          <h2 className="text-sm font-semibold text-slate-100">File Download</h2>
           <button
             onClick={handleClose}
             className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition"
           >
-            <X className="h-5 w-5" />
+            <X className="h-4 w-4" />
           </button>
         </div>
 
         {/* Modal Body */}
-        <div className="p-6 space-y-6">
+        <div className="p-5 space-y-5">
           {/* Target File Summary */}
-          <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-4 space-y-2">
+          <div className="bg-[#0d131f] border border-slate-800 rounded-xl p-3.5 space-y-1.5">
             <div className="flex items-center justify-between">
-              <span className="text-xs text-slate-400">Target File</span>
+              <span className="text-xs text-slate-400">Selected File</span>
               <span className="text-xs font-mono font-medium text-slate-300">
                 {formatBytes(file.size)}
               </span>
             </div>
-            <div className="font-semibold text-slate-200 truncate">{file.name}</div>
-            <div className="font-mono text-xs text-slate-500 truncate">{file.path}</div>
-            <div className="pt-2 border-t border-slate-800/80 flex items-center justify-between text-xs font-mono">
-              <span className="text-slate-400">SHA-256:</span>
-              <span className="text-cyan-400">{file.sha256.slice(0, 16)}...</span>
-            </div>
+            <div className="font-medium text-sm text-slate-100 truncate">{file.name}</div>
+            <div className="font-mono text-[11px] text-slate-400 truncate">{file.path}</div>
           </div>
 
           {/* State 1: WAITING FOR APPROVAL */}
           {status === 'WAITING_FOR_APPROVAL' && (
-            <div className="text-center py-6 space-y-4">
-              <div className="relative mx-auto w-24 h-24 flex items-center justify-center">
-                {/* Countdown Circular Ring */}
-                <svg className="w-24 h-24 transform -rotate-90">
+            <div className="text-center py-5 space-y-4">
+              <div className="relative mx-auto w-20 h-20 flex items-center justify-center">
+                <svg className="w-20 h-20 transform -rotate-90">
                   <circle
-                    cx="48"
-                    cy="48"
-                    r="40"
+                    cx="40"
+                    cy="40"
+                    r="34"
                     stroke="#1e293b"
-                    strokeWidth="6"
+                    strokeWidth="4"
                     fill="transparent"
                   />
                   <circle
-                    cx="48"
-                    cy="48"
-                    r="40"
-                    stroke="#06b6d4"
-                    strokeWidth="6"
+                    cx="40"
+                    cy="40"
+                    r="34"
+                    stroke="#3b82f6"
+                    strokeWidth="4"
                     fill="transparent"
-                    strokeDasharray={251.2}
-                    strokeDashoffset={251.2 * (1 - timeRemainingSec / 60)}
+                    strokeDasharray={213.6}
+                    strokeDashoffset={213.6 * (1 - timeRemainingSec / 60)}
                     className="transition-all duration-1000 ease-linear"
                   />
                 </svg>
                 <div className="absolute inset-0 flex flex-col items-center justify-center">
-                  <Clock className="h-5 w-5 text-cyan-400 mb-0.5" />
-                  <span className="text-xl font-bold font-mono text-white">{timeRemainingSec}s</span>
+                  <span className="text-lg font-bold font-mono text-white">{timeRemainingSec}s</span>
                 </div>
               </div>
 
               <div>
-                <h3 className="text-base font-semibold text-white">
-                  Waiting for Approval on Mobile Device...
+                <h3 className="text-sm font-semibold text-white">
+                  Waiting for Device Approval
                 </h3>
-                <p className="text-xs text-slate-400 max-w-sm mx-auto mt-1">
-                  A high-priority heads-up prompt has been dispatched. Please tap <span className="text-emerald-400 font-semibold">[ALLOW]</span> on your phone notification to authorize lease.
+                <p className="text-xs text-slate-400 max-w-xs mx-auto mt-1 leading-relaxed">
+                  A notification prompt was sent to your phone. Tap <span className="text-white font-medium">Allow</span> to start the transfer.
                 </p>
               </div>
 
-              {/* Security Banner */}
-              <div className="bg-slate-900 border border-slate-800 rounded-lg p-3 text-left flex items-start space-x-2.5">
-                <ShieldCheck className="h-4 w-4 text-emerald-400 mt-0.5 flex-shrink-0" />
-                <div className="text-xs text-slate-300">
-                  <span className="font-semibold text-slate-200">Replay-Protected Capability:</span> Single-use token bound by strict 60s cryptographic TTL. Phone remains dormant if ignored.
-                </div>
+              <div className="bg-slate-900/60 border border-slate-800/80 rounded-lg p-2.5 text-xs text-slate-400 flex items-center justify-center space-x-2">
+                <Smartphone className="h-3.5 w-3.5 text-slate-400 flex-shrink-0" />
+                <span>Single-use direct transfer • Auto-cancels in 60s</span>
               </div>
             </div>
           )}
 
           {/* State 2: APPROVED / NEGOTIATING / TRANSFERRING */}
           {(status === 'APPROVED' || status === 'NEGOTIATING' || status === 'TRANSFERRING') && (
-            <div className="space-y-4 py-4">
-              <div className="flex items-center space-x-3 text-emerald-400 bg-emerald-950/40 border border-emerald-800/60 p-3 rounded-xl text-xs">
-                <CheckCircle2 className="h-5 w-5 flex-shrink-0" />
-                <div>
-                  <span className="font-semibold">Cryptographic Lease Authorized!</span>
-                  <div className="text-slate-300">Zero-trust encrypted lease authorized by mobile device.</div>
-                </div>
+            <div className="space-y-4 py-3">
+              <div className="flex items-center space-x-2.5 text-emerald-400 bg-emerald-950/30 border border-emerald-800/40 p-3 rounded-xl text-xs">
+                <CheckCircle2 className="h-4 w-4 flex-shrink-0" />
+                <span className="text-slate-200">Transfer approved. Streaming data...</span>
               </div>
 
               {/* Progress Bar */}
               <div className="space-y-2">
                 <div className="flex justify-between text-xs">
-                  <span className="text-slate-400 font-medium">
-                    {transferProgress?.statusText || 'Streaming encrypted payload from phone...'}
+                  <span className="text-slate-400 font-medium truncate max-w-[220px]">
+                    {transferProgress?.statusText || 'Downloading file...'}
                   </span>
-                  <span className="font-mono text-cyan-400 font-semibold">
+                  <span className="font-mono text-blue-400 font-medium">
                     {transferProgress?.progressPercent || 0}%
                   </span>
                 </div>
-                <div className="w-full h-3 bg-slate-800 rounded-full overflow-hidden">
+                <div className="w-full h-2 bg-slate-800 rounded-full overflow-hidden">
                   <div
-                    className="h-full bg-gradient-to-r from-cyan-500 to-blue-500 transition-all duration-300"
+                    className="h-full bg-blue-600 transition-all duration-300 rounded-full"
                     style={{ width: `${transferProgress?.progressPercent || 5}%` }}
                   />
                 </div>
               </div>
 
-              {transferProgress?.speedMbps && (
+              {transferProgress && (
                 <div className="flex justify-between text-xs font-mono text-slate-400">
-                  <span>Speed: {transferProgress.speedMbps.toFixed(2)} Mbps</span>
+                  <span>{transferProgress.speedMbps > 0 ? `${transferProgress.speedMbps.toFixed(1)} MB/s` : 'P2P Stream'}</span>
                   <span>
-                    {(transferProgress.bytesReceived / 1024 / 1024).toFixed(2)} MB /{' '}
-                    {(file.size / 1024 / 1024).toFixed(2)} MB
+                    {(transferProgress.bytesReceived / 1024 / 1024).toFixed(1)} / {(file.size / 1024 / 1024).toFixed(1)} MB
                   </span>
                 </div>
               )}
@@ -710,25 +694,24 @@ function sha256Bytes(bytes: Uint8Array): string {
 
           {/* State 3: COMPLETED */}
           {status === 'COMPLETED' && (
-            <div className="text-center py-6 space-y-4">
-              <div className="h-16 w-16 mx-auto rounded-full bg-emerald-950 border border-emerald-500/40 flex items-center justify-center">
-                <CheckCircle2 className="h-9 w-9 text-emerald-400" />
+            <div className="text-center py-5 space-y-4">
+              <div className="h-12 w-12 mx-auto rounded-full bg-emerald-950/60 border border-emerald-500/30 flex items-center justify-center text-emerald-400">
+                <CheckCircle2 className="h-6 w-6" />
               </div>
               <div>
-                <h3 className="text-lg font-bold text-white">Transfer & Verification Complete!</h3>
+                <h3 className="text-base font-semibold text-white">Download Complete</h3>
                 <p className="text-xs text-slate-400 mt-1">
-                  File reassembled and automatically saved to your browser downloads.
+                  The file was saved to your downloads and verified bit-for-bit.
                 </p>
               </div>
 
-              {/* Integrity Verification Card */}
               {isIntegrityVerified && (
-                <div className="bg-slate-900 border border-emerald-500/30 rounded-xl p-3 text-left space-y-1">
-                  <div className="flex items-center space-x-2 text-xs font-semibold text-emerald-400">
-                    <ShieldCheck className="h-4 w-4" />
-                    <span>Cryptographic Integrity Match (SHA-256)</span>
+                <div className="bg-[#0d131f] border border-slate-800 rounded-lg p-2.5 text-left space-y-1">
+                  <div className="flex items-center space-x-1.5 text-xs text-slate-300">
+                    <ShieldCheck className="h-3.5 w-3.5 text-emerald-400" />
+                    <span className="font-medium">SHA-256 Verified:</span>
                   </div>
-                  <div className="font-mono text-[11px] text-slate-300 break-all">
+                  <div className="font-mono text-[11px] text-slate-400 break-all">
                     {verifiedSha256}
                   </div>
                 </div>
@@ -738,20 +721,20 @@ function sha256Bytes(bytes: Uint8Array): string {
 
           {/* State 4: REJECTED / EXPIRED / FAILED */}
           {(status === 'REJECTED' || status === 'EXPIRED' || status === 'FAILED') && (
-            <div className="text-center py-6 space-y-4">
-              <div className="h-16 w-16 mx-auto rounded-full bg-red-950/60 border border-red-500/40 flex items-center justify-center">
-                <AlertTriangle className="h-9 w-9 text-red-400" />
+            <div className="text-center py-5 space-y-3">
+              <div className="h-12 w-12 mx-auto rounded-full bg-red-950/60 border border-red-500/30 flex items-center justify-center text-red-400">
+                <AlertTriangle className="h-6 w-6" />
               </div>
               <div>
-                <h3 className="text-base font-bold text-white">
+                <h3 className="text-sm font-semibold text-white">
                   {status === 'REJECTED'
-                    ? 'Request Denied'
+                    ? 'Transfer Declined'
                     : status === 'EXPIRED'
                     ? 'Request Expired'
                     : 'Transfer Failed'}
                 </h3>
-                <p className="text-xs text-slate-400 max-w-sm mx-auto mt-1">
-                  {errorMessage || 'The lazy node could not fulfill this transfer request.'}
+                <p className="text-xs text-slate-400 max-w-xs mx-auto mt-1 leading-relaxed">
+                  {errorMessage || (status === 'REJECTED' ? 'The transfer request was declined on the mobile device.' : 'The transfer could not be completed.')}
                 </p>
               </div>
             </div>
@@ -759,10 +742,10 @@ function sha256Bytes(bytes: Uint8Array): string {
         </div>
 
         {/* Modal Footer */}
-        <div className="px-6 py-4 bg-[#0b1120] border-t border-slate-800 flex justify-end">
+        <div className="px-5 py-3 bg-[#0d131f] border-t border-slate-800 flex justify-end">
           <button
             onClick={handleClose}
-            className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold rounded-lg transition"
+            className="px-3.5 py-1.5 bg-slate-800 hover:bg-slate-700 active:bg-slate-600 text-slate-200 text-xs font-medium rounded-lg transition"
           >
             {status === 'COMPLETED' ? 'Done' : 'Dismiss'}
           </button>

@@ -1,6 +1,5 @@
 import React, { useState } from 'react';
-import { Lock, KeyRound, ShieldAlert, ArrowRight, Eye, EyeOff, CheckCircle2 } from 'lucide-react';
-
+import { Lock, ArrowRight, Eye, EyeOff, Loader2 } from 'lucide-react';
 import { db } from '../firebase.js';
 import { doc, getDoc } from 'firebase/firestore';
 
@@ -39,7 +38,7 @@ export const PasswordGate: React.FC<PasswordGateProps> = ({ vaultId, backendUrl,
             onUnlocked();
             return;
           } else {
-            throw new Error('Incorrect passcode. Check your Android device.');
+            throw new Error('Incorrect passcode. Please try again.');
           }
         } else {
           // No password required
@@ -58,12 +57,12 @@ export const PasswordGate: React.FC<PasswordGateProps> = ({ vaultId, backendUrl,
 
         if (!res.ok) {
           const data = await res.json().catch(() => ({}));
-          throw new Error(data.error || 'Incorrect passcode. Check your Android device.');
+          throw new Error(data.error || 'Incorrect passcode. Please try again.');
         }
 
         onUnlocked();
       } else {
-        throw new Error('Vault not found in cloud storage.');
+        throw new Error('Vault not found. Please verify the URL.');
       }
     } catch (err: any) {
       setError(err.message);
@@ -73,43 +72,37 @@ export const PasswordGate: React.FC<PasswordGateProps> = ({ vaultId, backendUrl,
   };
 
   return (
-    <div className="min-h-screen bg-[#070b14] flex flex-col items-center justify-center p-4">
-      {/* Glow Effect */}
-      <div className="absolute w-96 h-96 bg-cyan-500/10 rounded-full blur-3xl -z-10 pointer-events-none" />
-
-      <div className="w-full max-w-md bg-[#0f172a] border border-slate-800 rounded-2xl p-8 shadow-2xl space-y-6">
-        {/* Icon & Title */}
+    <div className="min-h-screen bg-[#0b0f17] flex flex-col items-center justify-center p-4">
+      <div className="w-full max-w-sm bg-[#111726] border border-slate-800 rounded-2xl p-7 shadow-xl space-y-6">
+        {/* Header */}
         <div className="text-center space-y-2">
-          <div className="h-16 w-16 mx-auto rounded-2xl bg-gradient-to-br from-amber-500/20 to-cyan-500/20 border border-amber-500/30 flex items-center justify-center shadow-lg shadow-amber-500/10">
-            <Lock className="h-8 w-8 text-amber-400" />
+          <div className="h-12 w-12 mx-auto rounded-xl bg-slate-900 border border-slate-800 flex items-center justify-center text-slate-200">
+            <Lock className="h-5 w-5 text-blue-500" />
           </div>
-          <h2 className="text-xl font-bold tracking-tight text-white">Encrypted Vault Gate</h2>
-          <div className="inline-flex items-center space-x-1.5 px-3 py-1 rounded-full bg-slate-900 border border-slate-700/80 text-xs font-mono text-cyan-400">
-            <span>Vault:</span>
-            <span className="font-semibold text-white">{vaultId}</span>
-          </div>
-          <p className="text-xs text-slate-400 pt-1">
-            This lazy storage node is password protected. Enter the passcode configured in your Android app to unlock the file catalog.
+          <h2 className="text-lg font-semibold tracking-tight text-white">Passcode Protected</h2>
+          <p className="text-xs text-slate-400">
+            Enter the passcode configured on the mobile device to access this vault.
           </p>
         </div>
 
-        {/* Password Form */}
+        {/* Form */}
         <form onSubmit={handleSubmit} className="space-y-4">
           <div className="space-y-1.5">
             <label className="block text-xs font-medium text-slate-300">
-              Vault Passcode
+              Passcode
             </label>
             <div className="relative">
               <input
                 type={showPassword ? 'text' : 'password'}
-                autoFocus
-                required
                 value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder="Enter passcode (e.g. vault123)"
-                className="w-full pl-10 pr-10 py-2.5 bg-slate-950 border border-slate-700 rounded-xl text-sm text-white placeholder-slate-500 focus:outline-none focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500 transition font-mono"
+                onChange={(e) => {
+                  setPassword(e.target.value);
+                  setError(null);
+                }}
+                autoFocus
+                placeholder="Enter vault passcode"
+                className="w-full pl-3.5 pr-10 py-2.5 bg-slate-900 border border-slate-700/80 rounded-lg text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition"
               />
-              <KeyRound className="absolute left-3.5 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-500" />
               <button
                 type="button"
                 onClick={() => setShowPassword(!showPassword)}
@@ -121,19 +114,21 @@ export const PasswordGate: React.FC<PasswordGateProps> = ({ vaultId, backendUrl,
           </div>
 
           {error && (
-            <div className="flex items-center space-x-2 p-3 bg-red-950/60 border border-red-500/40 rounded-xl text-xs text-red-300 animate-in fade-in">
-              <ShieldAlert className="h-4 w-4 flex-shrink-0 text-red-400" />
-              <span>{error}</span>
+            <div className="p-2.5 rounded-lg bg-red-950/40 border border-red-800/60 text-xs text-red-300">
+              {error}
             </div>
           )}
 
           <button
             type="submit"
-            disabled={isLoading || !password}
-            className="w-full flex items-center justify-center space-x-2 py-2.5 bg-cyan-600 hover:bg-cyan-500 text-slate-950 font-semibold text-sm rounded-xl transition shadow-lg shadow-cyan-500/20 disabled:opacity-50 disabled:cursor-not-allowed"
+            disabled={!password || isLoading}
+            className="w-full py-2.5 px-4 bg-blue-600 hover:bg-blue-500 active:bg-blue-700 text-white font-medium text-xs rounded-lg transition shadow-sm flex items-center justify-center space-x-2 disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {isLoading ? (
-              <span>Verifying...</span>
+              <>
+                <Loader2 className="h-4 w-4 animate-spin" />
+                <span>Verifying...</span>
+              </>
             ) : (
               <>
                 <span>Unlock Vault</span>
@@ -143,10 +138,8 @@ export const PasswordGate: React.FC<PasswordGateProps> = ({ vaultId, backendUrl,
           </button>
         </form>
 
-        {/* Security Notice */}
-        <div className="border-t border-slate-800/80 pt-4 flex items-start space-x-2 text-[11px] text-slate-500">
-          <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400 mt-0.5 flex-shrink-0" />
-          <span>Zero-Trust: The broker only grants catalog visibility upon passcode authentication. File blobs remain asleep on mobile storage.</span>
+        <div className="text-center pt-2 border-t border-slate-800/60">
+          <span className="text-[11px] text-slate-500 font-mono">Vault ID: {vaultId}</span>
         </div>
       </div>
     </div>

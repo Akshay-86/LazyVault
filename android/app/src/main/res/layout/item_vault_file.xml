@@ -4,14 +4,14 @@
     android:id="@+id/cardFileRoot"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
-    android:layout_marginBottom="8dp"
+    android:layout_marginBottom="6dp"
     android:clickable="true"
     android:focusable="true"
     android:foreground="?attr/selectableItemBackground"
-    app:cardBackgroundColor="#0F172A"
-    app:cardCornerRadius="12dp"
+    app:cardBackgroundColor="@color/vault_surface_card"
+    app:cardCornerRadius="10dp"
     app:cardElevation="0dp"
-    app:strokeColor="#1E293B"
+    app:strokeColor="@color/vault_surface_stroke"
     app:strokeWidth="1dp">
 
     <LinearLayout
@@ -36,7 +36,7 @@
                 android:fontFamily="sans-serif-medium"
                 android:singleLine="true"
                 android:text="filename.jpg"
-                android:textColor="#F8FAFC"
+                android:textColor="@color/vault_text_primary"
                 android:textSize="13sp" />
 
             <TextView
@@ -44,10 +44,10 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="2dp"
-                android:fontFamily="monospace"
+                android:fontFamily="sans-serif"
                 android:singleLine="true"
                 android:text="376.3 KB  •  SHA: 0f2adaee...e9c0"
-                android:textColor="#64748B"
+                android:textColor="@color/vault_text_secondary"
                 android:textSize="11sp" />
         </LinearLayout>
 
@@ -58,11 +58,11 @@
             android:background="?attr/selectableItemBackgroundBorderless"
             android:clickable="true"
             android:focusable="true"
-            android:gravity="center"
-            android:paddingHorizontal="10dp"
-            android:paddingVertical="4dp"
+            android:padding="6dp"
             android:text="⋮"
-            android:textColor="#38BDF8"
-            android:textSize="20sp" />
+            android:textColor="@color/vault_text_secondary"
+            android:textSize="16sp"
+            android:textStyle="bold" />
     </LinearLayout>
+
 </com.google.android.material.card.MaterialCardView>
