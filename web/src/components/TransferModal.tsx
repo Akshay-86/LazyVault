@@ -100,12 +100,15 @@ export const TransferModal: React.FC<TransferModalProps> = ({ file, backendUrl, 
             onError: (err) => {
               if (isMounted) {
                 console.warn('[TransferModal] WebRTC error, holding for relay fallback:', err.message);
+                const isLarge = file.size > 50 * 1024 * 1024;
                 setTransferProgress((prev) => ({
                   bytesReceived: prev?.bytesReceived || 0,
                   totalBytes: file.size,
                   progressPercent: 25,
                   speedMbps: 0,
-                  statusText: 'Direct P2P blocked by carrier NAT. Waiting for encrypted relay fallback...',
+                  statusText: isLarge
+                    ? 'Direct P2P blocked by carrier NAT. File > 50 MB cannot use cloud relay (connect phone to Wi-Fi).'
+                    : 'Direct P2P blocked by carrier NAT. Waiting for encrypted relay fallback...',
                 }));
               }
             },
@@ -689,6 +692,19 @@ function sha256Bytes(bytes: Uint8Array): string {
             <div className="font-medium text-sm text-slate-100 truncate">{file.name}</div>
             <div className="font-mono text-[11px] text-slate-400 truncate">{file.path}</div>
           </div>
+
+          {/* Large File Advisory */}
+          {file.size >= 100 * 1024 * 1024 && (
+            <div className="bg-amber-950/20 border border-amber-800/40 rounded-xl p-3 text-xs text-amber-300 flex items-start space-x-2.5">
+              <AlertTriangle className="h-4 w-4 text-amber-400 flex-shrink-0 mt-0.5" />
+              <div>
+                <span className="font-medium text-amber-200">Large File Transfer ({formatBytes(file.size)})</span>
+                <p className="text-amber-400/80 text-[11px] mt-0.5 leading-relaxed">
+                  Large files stream directly peer-to-peer via WebRTC. For fastest speed and reliability across cellular networks, ensure the host phone is awake and connected to Wi-Fi.
+                </p>
+              </div>
+            </div>
+          )}
 
           {/* State 1: WAITING FOR APPROVAL */}
           {status === 'WAITING_FOR_APPROVAL' && (

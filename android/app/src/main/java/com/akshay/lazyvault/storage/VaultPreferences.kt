@@ -41,7 +41,16 @@ class VaultPreferences(context: Context) {
         set(value) = prefs.edit().putLong("vault_exp_seconds", value).apply()
 
     var shareableUrl: String?
-        get() = prefs.getString("shareable_url", null)
+        get() {
+            val url = prefs.getString("shareable_url", null)
+            return if (url != null && url.contains("lazyvault-node.web.app")) {
+                val updated = url.replace("lazyvault-node.web.app", "lazyvault.web.app")
+                prefs.edit().putString("shareable_url", updated).apply()
+                updated
+            } else {
+                url
+            }
+        }
         set(value) = prefs.edit().putString("shareable_url", value).apply()
 
     var deviceId: String

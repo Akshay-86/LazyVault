@@ -34,6 +34,7 @@ class TransferEngine(private val context: Context) {
     companion object {
         const val CHUNK_SIZE = 64 * 1024 // 64KB chunks for optimal throughput on high-speed Wi-Fi and direct LAN
         const val BUFFERED_AMOUNT_LOW_THRESHOLD = 4 * 1024 * 1024L // 4MB backpressure window (supports high BDP links)
+        const val MAX_RELAY_FILE_SIZE_BYTES = 50 * 1024 * 1024L // 50MB maximum for cloud chunk relay to protect memory & quota
     }
 
     private val storageManager = VaultStorageManager(context)
@@ -145,7 +146,8 @@ class TransferEngine(private val context: Context) {
                 PeerConnection.IceServer.builder("stun:stun.l.google.com:19302").createIceServer(),
                 PeerConnection.IceServer.builder("stun:stun1.l.google.com:19302").createIceServer(),
                 PeerConnection.IceServer.builder("stun:stun2.l.google.com:19302").createIceServer(),
-                PeerConnection.IceServer.builder("stun:stun.cloudflare.com:3478").createIceServer()
+                PeerConnection.IceServer.builder("stun:stun.cloudflare.com:3478").createIceServer(),
+                PeerConnection.IceServer.builder("stun:global.stun.twilio.com:3478").createIceServer()
             )
 
             val rtcConfig = PeerConnection.RTCConfiguration(iceServers).apply {
@@ -470,6 +472,22 @@ class TransferEngine(private val context: Context) {
         targetSha256: String,
         onProgress: (percent: Int, status: String) -> Unit
     ): Boolean = withContext(Dispatchers.IO) {
+        val fileSize = storageManager.getFileSize(path, targetSha256)
+        if (fileSize > MAX_RELAY_FILE_SIZE_BYTES) {
+            val sizeMb = fileSize / (1024 * 1024)
+            val errorMsg = "Direct P2P blocked by carrier NAT. File size (${sizeMb} MB) exceeds 50 MB cloud relay limit. Please connect both devices to Wi-Fi for direct P2P streaming."
+            Log.w(TAG, errorMsg)
+            onProgress(0, errorMsg)
+            try {
+                firebaseVaultManager.updateRequestStatus(
+                    requestId,
+                    status = "FAILED",
+                    error = errorMsg
+                )
+            } catch (ignored: Exception) {}
+            return@withContext false
+        }
+
         try {
             onProgress(25, "Generating ephemeral AES-256-GCM symmetric key...")
 

@@ -137,7 +137,17 @@ export const CatalogTable: React.FC<CatalogTableProps> = ({ files, onRequestFile
 
                   {/* Size */}
                   <td className="py-3 px-4 text-xs text-slate-300 whitespace-nowrap">
-                    {formatBytes(file.size)}
+                    <div className="flex items-center space-x-1.5">
+                      <span>{formatBytes(file.size)}</span>
+                      {file.size >= 100 * 1024 * 1024 && (
+                        <span
+                          className="px-1.5 py-0.5 text-[10px] font-medium bg-amber-500/10 text-amber-400 border border-amber-500/25 rounded"
+                          title="Large File (>100MB): Streams directly via WebRTC P2P (Wi-Fi recommended)"
+                        >
+                          Large P2P
+                        </span>
+                      )}
+                    </div>
                   </td>
 
                   {/* Checksum */}

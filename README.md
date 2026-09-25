@@ -81,16 +81,24 @@ Traditional remote storage solutions require running an always-on server, keepin
 * **1-Tap Revocation**: Tapping **"Revoke & Regenerate"** instantly rotates the Vault ID and wipes previous authorization tokens.
 * **Live Audit Log**: Every transfer request, whether approved or rejected, is permanently recorded in local device storage with timestamp, requester context, transport type, and decision.
 
-### 📱 Android 14+ (API 34+) Compliance
-* **User-Initiated Data Transfer (UIDT)**: Uses Android 14's `JobScheduler` UIDT pipeline (`jobInfo.setUserInitiated(true)`) to prevent the OS from killing transfers when the phone's screen locks.
+### 📱 Android 14+ (API 34+) Compliance & Background Daemon
+* **24/7 Background Daemon Service (`VaultDaemonService`)**: Runs as a low-overhead foreground service (`FOREGROUND_SERVICE_TYPE_DATA_SYNC` with `PARTIAL_WAKE_LOCK`), ensuring instantaneous heads-up approval notifications even when the app is minimized, the screen is locked, or aggressive OEM battery optimizers (ColorOS, Realme UI, MIUI) are active.
+* **User-Initiated Data Transfer (UIDT)**: Uses Android 14's `JobScheduler` UIDT pipeline (`jobInfo.setUserInitiated(true)`) to prevent the OS from killing active transfers when the phone's screen locks.
 * **Storage Access Framework (SAF)**: Select any directory on device internal storage or SD card (`ACTION_OPEN_DOCUMENT_TREE`) without requesting invasive root or legacy broad storage permissions.
 * **Instant 0ms App Launch (Catalog Caching)**: Directory trees and hashes are cached locally (`catalog_cache.json`). The app loads immediately without re-hashing hundreds of files on every activity change. Re-indexing only runs when files change or when explicitly requested.
 * **Zombie Request Auto-Purge**: All transfer requests feature a strict 60-second time-to-live (TTL). If a request expires or the browser modal is closed, it is automatically marked `EXPIRED` or `CANCELLED` and silently suppressed.
 
-### 🌐 High-Performance WebRTC Binary Pipeline
+### 🌐 High-Performance WebRTC Binary Pipeline & Global Discovery
 * **Chunked Streaming**: Files are sliced into 64KB binary frames and streamed over an SCTP `RTCDataChannel`.
 * **Flow Control & Backpressure**: Leverages `bufferedAmountLowThreshold` events to prevent memory bloating and buffer overflow when transmitting gigabyte-sized files.
+* **Multi-STUN Global Discovery**: Integrated with Google (`stun.l.google.com`), Cloudflare (`stun.cloudflare.com`), and Twilio (`global.stun.twilio.com`) STUN infrastructure for maximum peer-to-peer NAT traversal across international carrier networks.
 * **Automated Client Integrity Verification**: Files are piped through browser `crypto.subtle.digest('SHA-256')` as they arrive, guaranteeing bit-perfect authenticity before initiating download.
+
+### 🛡️ Large File Transfer & Safety Safeguards (1 GB+ Protection)
+* **Direct WebRTC P2P for Big Files**: Direct peer-to-peer streaming operates without arbitrary file size limits (from 1 MB to 10+ GB), reading through a continuous 64KB buffer using under 4 MB of device RAM.
+* **Memory & Quota Circuit Breaker**: The cloud chunk relay fallback enforces a strict 50 MB limit (`MAX_RELAY_FILE_SIZE_BYTES`). If WebRTC is blocked by cellular carrier NAT on a large file (>50 MB), the transfer fails safely and cleanly rather than attempting to buffer gigabytes into mobile RAM (preventing `OutOfMemoryError`) or exhausting daily Firestore document write quotas.
+* **Cellular Data Allowance Warnings**: Android notifications and in-app approval cards highlight `⚠️ Large File (X GB) — Wi-Fi Recommended` for any request $\ge 100\text{ MB}$, ensuring device owners do not inadvertently exhaust cellular mobile data.
+* **Web Portal Badges & Advisory**: Files $\ge 100\text{ MB}$ in the catalog display a `Large P2P` pill badge and prompt users in the download modal to verify the host phone is awake and on Wi-Fi for maximum throughput.
 
 ---
 
@@ -146,7 +154,7 @@ No local computer or server needed! Everything runs directly between your Androi
 5. Tap **"Share Vault"** or scan the on-screen QR code.
 
 #### 3. Access Files from Any Browser
-1. Navigate to: **`https://lazyvault-node.web.app/v/<YOUR_VAULT_ID>`**
+1. Navigate to: **`https://lazyvault.web.app/v/<YOUR_VAULT_ID>`**
 2. Enter your passcode if prompted.
 3. Browse your phone's catalog and click **"Download"** on any file.
 4. An immediate heads-up notification will appear on your phone:  
@@ -165,7 +173,7 @@ No local computer or server needed! Everything runs directly between your Androi
 #### 1. Compile the Android App Locally
 ```bash
 # Clone the repository
-git clone https://github.com/akshay/LazyVault.git
+git clone https://github.com/Akshay-86/LazyVault.git
 cd LazyVault
 
 # Build debug APK
@@ -233,7 +241,8 @@ The workflow works automatically out of the box with zero secrets by falling bac
 | **Silent Data Leeching / Exfiltration** | The Android node strictly ignores transfer requests unless an explicit human `[ALLOW]` action is registered via the system heads-up notification prompt. |
 | **Man-in-the-Middle (MITM)** | WebRTC P2P DataChannels enforce mandatory DTLS-SRTP end-to-end encryption. In relay mode, files are encrypted on-device with AES-256-GCM using ephemeral keys. |
 | **Tampered / Corrupted Payloads** | Payloads are streamed into browser memory and checked against the original SHA-256 hash using the Web Crypto API (`crypto.subtle.digest`) before the browser saves the file. |
-| **Memory Exhaustion (OOM)** | Large files are never read fully into RAM. Android streams through memory-mapped I/O in 64KB chunks with flow control (`bufferedAmountLowThreshold`), and client reassembles progressively. |
+| **Memory Exhaustion (OOM) & Relay Abuse** | Large files are never buffered into RAM. WebRTC P2P streams continuous 64KB frames with backpressure. If P2P fails, the cloud relay strictly enforces a **50 MB circuit breaker** (`MAX_RELAY_FILE_SIZE_BYTES`) to prevent mobile heap exhaustion and conserve Firestore write quotas. |
+| **Cellular Data Allowance Drain** | Requests $\ge 100\text{ MB}$ trigger prominent `⚠️ Large File (X GB) — Wi-Fi Recommended` alerts in Android heads-up prompts and in-app cards before the user can tap `[ALLOW]`. |
 
 ---
 
@@ -244,7 +253,7 @@ For headless automation pipelines (e.g., pulling a secure build artifact or data
 ```bash
 # Request a file via CLI (Python 3, zero third-party dependencies):
 python3 cli/lazyvault-get.py \
-  --backend-url https://lazyvault-node.web.app \
+  --backend-url https://lazyvault.web.app \
   --path "/storage/vault/database_backup.sqlite.enc" \
   --output ./database_backup.sqlite.enc \
   --timeout 60

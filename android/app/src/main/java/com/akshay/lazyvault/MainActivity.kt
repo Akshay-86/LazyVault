@@ -142,7 +142,7 @@ class MainActivity : AppCompatActivity() {
             renderFileList(cached)
             binding.contentMain.textCurrentFolder.text = "Folder: ${storageManager.getSelectedFolderDisplayName()}"
             binding.contentMain.cardIndexingState.visibility = LinearLayout.GONE
-            val cloudLink = prefs.shareableUrl ?: "https://lazyvault-node.web.app/v/${prefs.vaultId}"
+            val cloudLink = prefs.shareableUrl ?: "https://lazyvault.web.app/v/${prefs.vaultId}"
             binding.contentMain.textShareLink.text = cloudLink
         } else {
             performCatalogIndexing()
@@ -184,10 +184,8 @@ class MainActivity : AppCompatActivity() {
         binding.contentMain.textLinkExpiryBadge.text = formatExpiryBadge(prefs.vaultExpirationSeconds)
         binding.contentMain.btnSelectExpiration.text = formatExpiryButton(prefs.vaultExpirationSeconds)
 
-        val cachedUrl = prefs.shareableUrl
-        if (cachedUrl != null) {
-            binding.contentMain.textShareLink.text = cachedUrl
-        }
+        val cachedUrl = prefs.shareableUrl ?: "https://lazyvault.web.app/v/${prefs.vaultId}"
+        binding.contentMain.textShareLink.text = cachedUrl
 
         binding.contentMain.btnCopyLink.setOnClickListener {
             val link = binding.contentMain.textShareLink.text.toString()
@@ -323,7 +321,7 @@ class MainActivity : AppCompatActivity() {
 
             // Resolve shareable link: use permanent Firebase Hosting URL
             val syncOutcome = withContext(Dispatchers.IO) {
-                val cloudLink = "https://lazyvault-node.web.app/v/${prefs.vaultId}"
+                val cloudLink = "https://lazyvault.web.app/v/${prefs.vaultId}"
                 prefs.shareableUrl = cloudLink
 
                 // 1. Sync directly to Cloud Firestore (Serverless)
@@ -697,10 +695,13 @@ class MainActivity : AppCompatActivity() {
 
         // 2. Display In-App Alert Card
         val filename = request.path.substringAfterLast('/')
+        val fileSize = storageManager.getFileSize(request.path, request.sha256)
+        val isLarge = fileSize >= 100 * 1024 * 1024L
+        val formattedSize = if (fileSize > 0) formatFileSize(fileSize) else ""
         val remainingSecs = Math.max(0, ((request.expiresAt - System.currentTimeMillis()) / 1000).toInt())
         binding.contentMain.cardIncomingRequest.visibility = View.VISIBLE
-        binding.contentMain.textIncomingFilename.text = filename
-        binding.contentMain.textIncomingRequester.text = "From: ${request.requesterContext} (${request.requesterIp})"
+        binding.contentMain.textIncomingFilename.text = if (isLarge) "⚠️ $filename ($formattedSize) - Large File" else if (formattedSize.isNotEmpty()) "$filename ($formattedSize)" else filename
+        binding.contentMain.textIncomingRequester.text = if (isLarge) "⚠️ Consumes $formattedSize data. Wi-Fi recommended.\nFrom: ${request.requesterContext}" else "From: ${request.requesterContext} (${request.requesterIp})"
         binding.contentMain.textRequestTimer.text = "${remainingSecs}s"
 
         binding.contentMain.btnDenyIncoming.setOnClickListener {

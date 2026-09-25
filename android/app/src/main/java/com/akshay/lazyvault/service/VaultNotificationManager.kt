@@ -60,6 +60,9 @@ object VaultNotificationManager {
         val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
 
         val filename = request.path.substringAfterLast('/')
+        val fileSize = com.akshay.lazyvault.storage.VaultStorageManager(context).getFileSize(request.path, request.sha256)
+        val isLargeFile = fileSize >= 100 * 1024 * 1024L
+        val sizeStr = if (fileSize > 0) formatBytes(fileSize) else ""
 
         val contentIntent = Intent(context, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
@@ -102,14 +105,18 @@ object VaultNotificationManager {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
+        val notifTitle = if (isLargeFile) "⚠️ Large File Request: $filename ($sizeStr)" else if (sizeStr.isNotEmpty()) "Vault Request: $filename ($sizeStr)" else "Vault Request: $filename"
+        val notifSubtitle = if (isLargeFile) "⚠️ Warning: Consumes $sizeStr data. Wi-Fi recommended." else "Requester: ${request.requesterContext} (IP: ${request.requesterIp})"
+
         val builder = NotificationCompat.Builder(context, CHANNEL_ID_REQUESTS)
             .setSmallIcon(R.drawable.ic_launcher_foreground)
-            .setContentTitle("Vault Request: $filename")
-            .setContentText("Requester: ${request.requesterContext} (IP: ${request.requesterIp})")
+            .setContentTitle(notifTitle)
+            .setContentText(notifSubtitle)
             .setStyle(
                 NotificationCompat.BigTextStyle()
                     .bigText(
-                        "Incoming lease request for file: ${request.path}\n" +
+                        (if (isLargeFile) "⚠️ LARGE FILE WARNING: Transferring $sizeStr will consume cellular data. Wi-Fi is strongly recommended.\n\n" else if (sizeStr.isNotEmpty()) "File Size: $sizeStr\n" else "") +
+                        "File: ${request.path}\n" +
                         "Requester: ${request.requesterContext}\n" +
                         "IP Address: ${request.requesterIp}\n" +
                         "Target SHA-256: ${request.sha256.take(16)}...\n" +
@@ -127,6 +134,15 @@ object VaultNotificationManager {
 
         val notificationId = request.requestId.hashCode()
         notificationManager.notify(notificationId, builder.build())
+    }
+
+    private fun formatBytes(bytes: Long): String {
+        if (bytes <= 0) return "0 B"
+        val units = arrayOf("B", "KB", "MB", "GB", "TB")
+        val digitGroups = (Math.log10(bytes.toDouble()) / Math.log10(1024.0)).toInt()
+        val index = digitGroups.coerceIn(0, units.size - 1)
+        val value = bytes / Math.pow(1024.0, index.toDouble())
+        return String.format(java.util.Locale.US, "%.1f %s", value, units[index])
     }
 
     fun buildProgressNotification(context: Context, filename: String, progressPercent: Int, statusText: String): Notification {
