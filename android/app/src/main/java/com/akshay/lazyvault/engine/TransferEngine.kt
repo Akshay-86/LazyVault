@@ -32,11 +32,12 @@ class TransferEngine(private val context: Context) {
     private val scope = CoroutineScope(Dispatchers.IO)
 
     companion object {
-        const val CHUNK_SIZE = 32 * 1024 // 32KB chunks for optimal WebRTC SCTP throughput and cellular reliability
-        const val BUFFERED_AMOUNT_LOW_THRESHOLD = 512 * 1024L // 512KB backpressure threshold
+        const val CHUNK_SIZE = 64 * 1024 // 64KB chunks for optimal throughput on high-speed Wi-Fi and direct LAN
+        const val BUFFERED_AMOUNT_LOW_THRESHOLD = 4 * 1024 * 1024L // 4MB backpressure window (supports high BDP links)
     }
 
     private val storageManager = VaultStorageManager(context)
+    private val firebaseVaultManager = FirebaseVaultManager(context)
 
     suspend fun executeTransfer(
         requestId: String,
@@ -78,7 +79,7 @@ class TransferEngine(private val context: Context) {
             if (webrtcSuccess) {
                 success = true
                 transportUsed = "webrtc"
-            } else if (supportedTransports.contains("relay") && backendUrl.isNotEmpty()) {
+            } else if (supportedTransports.contains("relay")) {
                 Log.w(TAG, "WebRTC transfer could not complete or timed out. Falling back to Encrypted Ephemeral Relay.")
                 onProgress(20, "WebRTC peer unavailable. Falling back to encrypted relay...")
                 success = executeRelayTransfer(backendUrl, requestId, path, targetSha256, onProgress)
@@ -95,6 +96,11 @@ class TransferEngine(private val context: Context) {
             if (webrtcSuccess) {
                 success = true
                 transportUsed = "webrtc"
+            } else {
+                Log.w(TAG, "WebRTC transfer failed. Falling back to Encrypted Ephemeral Relay.")
+                onProgress(20, "WebRTC peer unavailable. Falling back to encrypted relay...")
+                success = executeRelayTransfer(backendUrl, requestId, path, targetSha256, onProgress)
+                transportUsed = "relay"
             }
         }
 
@@ -185,6 +191,7 @@ class TransferEngine(private val context: Context) {
 
             var activeDataChannel: DataChannel? = null
             var channelOpened = false
+            var iceFailed = false
             var isRemoteDescSet = false
             val queuedCandidates = mutableListOf<IceCandidate>()
 
@@ -196,6 +203,9 @@ class TransferEngine(private val context: Context) {
                 }
                 override fun onIceConnectionChange(state: PeerConnection.IceConnectionState?) {
                     Log.d(TAG, "IceConnectionState: $state")
+                    if (state == PeerConnection.IceConnectionState.FAILED) {
+                        iceFailed = true
+                    }
                 }
                 override fun onIceConnectionReceivingChange(receiving: Boolean) {}
                 override fun onIceGatheringChange(state: PeerConnection.IceGatheringState?) {
@@ -333,14 +343,14 @@ class TransferEngine(private val context: Context) {
                 }
             }, remoteDesc)
 
-            // Wait for DataChannel to Open (max 20 seconds)
+            // Wait for DataChannel to Open (max 8 seconds, break immediately if ICE failed)
             val channelWaitStart = System.currentTimeMillis()
-            while (!channelOpened && System.currentTimeMillis() - channelWaitStart < 20000L) {
+            while (!channelOpened && !iceFailed && System.currentTimeMillis() - channelWaitStart < 8000L) {
                 delay(200)
             }
 
-            if (!channelOpened || activeDataChannel == null) {
-                Log.w(TAG, "DataChannel did not open within timeout")
+            if (!channelOpened || activeDataChannel == null || iceFailed) {
+                Log.w(TAG, "DataChannel did not open within timeout (iceFailed=$iceFailed)")
                 callerCandSub?.remove()
                 peerConnection.close()
                 factory.dispose()
@@ -394,13 +404,13 @@ class TransferEngine(private val context: Context) {
 
                     // Backpressure check: wait if bufferedAmount exceeds threshold
                     while (dc.bufferedAmount() > BUFFERED_AMOUNT_LOW_THRESHOLD) {
-                        delay(5)
+                        delay(2)
                     }
 
                     // Retry sending until accepted by DataChannel buffer
                     while (!dc.send(dataBuffer)) {
                         if (dc.state() != DataChannel.State.OPEN) break
-                        delay(10)
+                        delay(2)
                     }
                     bytesSent += read
 
@@ -414,6 +424,14 @@ class TransferEngine(private val context: Context) {
                         onProgress(percent, "Streaming P2P: $sentMb MB / $totalMb MB")
                     }
                 }
+            }
+
+            if (bytesSent < fileLength) {
+                Log.e(TAG, "WebRTC transfer incomplete: sent $bytesSent of $fileLength bytes")
+                callerCandSub?.remove()
+                peerConnection.close()
+                factory.dispose()
+                return@withContext false
             }
 
             // Send EOF control packet with final SHA-256
@@ -481,32 +499,50 @@ class TransferEngine(private val context: Context) {
             val plaintext = inputStream.use { it.readBytes() }
             val ciphertext = cipher.doFinal(plaintext)
 
-            onProgress(65, "Streaming ciphertext to ephemeral zero-trust relay...")
-            val uploadSuccess = apiClient.uploadRelayBytes(
-                backendUrl = backendUrl,
-                requestId = requestId,
-                bytes = ciphertext
-            )
-
-            if (!uploadSuccess) {
-                Log.e(TAG, "Failed uploading encrypted stream to relay for $requestId")
-                return@withContext false
+            var relayUploaded = false
+            if (backendUrl.isNotEmpty() && !backendUrl.contains("192.168.10.15")) {
+                onProgress(65, "Streaming ciphertext to ephemeral zero-trust relay...")
+                val uploadSuccess = apiClient.uploadRelayBytes(
+                    backendUrl = backendUrl,
+                    requestId = requestId,
+                    bytes = ciphertext
+                )
+                if (uploadSuccess) {
+                    onProgress(90, "Handing ephemeral decryption key to broker capability...")
+                    val completeSuccess = apiClient.completeRelay(
+                        backendUrl = backendUrl,
+                        requestId = requestId,
+                        ephemeralKeyB64 = keyB64,
+                        ivB64 = ivB64,
+                        tagB64 = "",
+                        sizeBytes = ciphertext.size.toLong()
+                    )
+                    if (completeSuccess) {
+                        relayUploaded = true
+                    }
+                }
             }
 
-            onProgress(90, "Handing ephemeral decryption key to broker capability...")
-
-            val completeSuccess = apiClient.completeRelay(
-                backendUrl = backendUrl,
-                requestId = requestId,
-                ephemeralKeyB64 = keyB64,
-                ivB64 = ivB64,
-                tagB64 = "",
-                sizeBytes = ciphertext.size.toLong()
-            )
+            if (!relayUploaded) {
+                // Serverless Cloud Firestore Chunk Relay (Zero-Trust, Works Anywhere across 5G/Wi-Fi/CI-CD)
+                Log.d(TAG, "Uploading encrypted chunks to serverless Cloud Firestore for $requestId")
+                val firestoreSuccess = firebaseVaultManager.uploadEncryptedChunks(
+                    requestId = requestId,
+                    ciphertext = ciphertext,
+                    keyB64 = keyB64,
+                    ivB64 = ivB64,
+                    targetSha256 = targetSha256,
+                    onProgress = onProgress
+                )
+                if (!firestoreSuccess) {
+                    Log.e(TAG, "Failed uploading encrypted stream to relay/firestore for $requestId")
+                    return@withContext false
+                }
+            }
 
             onProgress(100, "Encrypted relay transfer complete!")
             Log.d(TAG, "Relay transfer complete for $requestId (${ciphertext.size} bytes). Key dispatched.")
-            completeSuccess
+            true
         } catch (e: Exception) {
             Log.e(TAG, "Relay transfer failed for $requestId", e)
             false

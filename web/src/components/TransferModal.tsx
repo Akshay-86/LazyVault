@@ -15,7 +15,7 @@ import {
   Radio,
 } from 'lucide-react';
 import { db } from '../firebase.js';
-import { collection, addDoc, doc, onSnapshot, updateDoc, getDoc } from 'firebase/firestore';
+import { collection, addDoc, doc, onSnapshot, updateDoc, getDoc, deleteDoc } from 'firebase/firestore';
 
 interface TransferModalProps {
   file: CatalogItem;
@@ -55,7 +55,7 @@ export const TransferModal: React.FC<TransferModalProps> = ({ file, backendUrl, 
             status: 'WAITING_FOR_APPROVAL',
             requesterContext: `Web Browser (${navigator.userAgent.split(' ')[0]})`,
             requesterIp: 'Remote Client',
-            supportedTransports: ['webrtc'],
+            supportedTransports: ['webrtc', 'relay'],
             createdAt: Date.now(),
             expiresAt: Date.now() + 60000,
           });
@@ -99,8 +99,14 @@ export const TransferModal: React.FC<TransferModalProps> = ({ file, backendUrl, 
             },
             onError: (err) => {
               if (isMounted) {
-                setStatus('FAILED');
-                setErrorMessage(err.message);
+                console.warn('[TransferModal] WebRTC error, holding for relay fallback:', err.message);
+                setTransferProgress((prev) => ({
+                  bytesReceived: prev?.bytesReceived || 0,
+                  totalBytes: file.size,
+                  progressPercent: 25,
+                  speedMbps: 0,
+                  statusText: 'Direct P2P blocked by carrier NAT. Waiting for encrypted relay fallback...',
+                }));
               }
             },
           });
@@ -126,9 +132,14 @@ export const TransferModal: React.FC<TransferModalProps> = ({ file, backendUrl, 
                   setErrorMessage('Transfer was denied on the Android device.');
                   receiver.close();
                 } else if (data.status === 'COMPLETED') {
-                  setStatus('COMPLETED');
-                  setIsIntegrityVerified(true);
-                  setVerifiedSha256(data.sha256 || file.sha256);
+                  const relayMeta = data.relayMetadata || data.relay_metadata;
+                  if ((data.chosenTransport === 'relay' || relayMeta) && !isDownloadingRef.current) {
+                    executeRelayDownload(generatedReqId, relayMeta);
+                  } else if (!isDownloadingRef.current) {
+                    setStatus('COMPLETED');
+                    setIsIntegrityVerified(true);
+                    setVerifiedSha256(data.sha256 || file.sha256);
+                  }
                 } else if (data.status === 'EXPIRED') {
                   setStatus('EXPIRED');
                   setErrorMessage('Transfer request expired (60s limit reached before approval).');
@@ -433,24 +444,75 @@ function sha256Bytes(bytes: Uint8Array): string {
           statusText: 'Streaming encrypted ciphertext from zero-trust relay...',
         });
 
-        const endpoints = [
-          relayMeta.downloadUrl,
-          `${backendUrl}/api/v1/relay/download/${reqId}`,
-          `${backendUrl}/api/v1/relay/${reqId}/download`,
-        ];
-
         let cipherBuffer: ArrayBuffer | null = null;
         let lastErr: any = null;
 
-        for (const ep of endpoints) {
+        // 1. Download Serverless Encrypted Chunks from Firestore (Zero-Trust, Serverless)
+        if (relayMeta.chunkCount && vaultId) {
+          setTransferProgress({
+            bytesReceived: 0,
+            totalBytes: file.size,
+            progressPercent: 50,
+            speedMbps: 0,
+            statusText: `Downloading ${relayMeta.chunkCount} encrypted chunks from cloud relay...`,
+          });
           try {
-            const resp = await fetch(ep);
-            if (resp.ok) {
-              cipherBuffer = await resp.arrayBuffer();
-              break;
+            const chunkPromises = [];
+            for (let i = 0; i < relayMeta.chunkCount; i++) {
+              chunkPromises.push(getDoc(doc(db, 'vaults', vaultId, 'requests', reqId, 'chunks', `${i}`)));
             }
-          } catch (e) {
-            lastErr = e;
+            const chunkDocs = await Promise.all(chunkPromises);
+            const byteArrays: Uint8Array[] = [];
+            let totalLen = 0;
+            for (const cDoc of chunkDocs) {
+              if (!cDoc.exists()) throw new Error(`Missing chunk document ${cDoc.id} in Firestore`);
+              const b64 = cDoc.data().data;
+              const binaryStr = atob(b64);
+              const u8 = new Uint8Array(binaryStr.length);
+              for (let k = 0; k < binaryStr.length; k++) {
+                u8[k] = binaryStr.charCodeAt(k);
+              }
+              byteArrays.push(u8);
+              totalLen += u8.length;
+            }
+            const combined = new Uint8Array(totalLen);
+            let offset = 0;
+            for (const ba of byteArrays) {
+              combined.set(ba, offset);
+              offset += ba.length;
+            }
+            cipherBuffer = combined.buffer;
+
+            // Zero-Trust cleanup: asynchronously delete chunks from Firestore
+            setTimeout(() => {
+              for (let i = 0; i < relayMeta.chunkCount; i++) {
+                deleteDoc(doc(db, 'vaults', vaultId, 'requests', reqId, 'chunks', `${i}`)).catch(() => {});
+              }
+            }, 5000);
+          } catch (chunkErr: any) {
+            console.warn('[TransferModal] Firestore chunk download error:', chunkErr);
+            lastErr = chunkErr;
+          }
+        }
+
+        // 2. Fall back to REST relay endpoints if cipherBuffer not yet retrieved
+        if (!cipherBuffer) {
+          const endpoints = [
+            relayMeta.downloadUrl,
+            backendUrl ? `${backendUrl}/api/v1/relay/download/${reqId}` : null,
+            backendUrl ? `${backendUrl}/api/v1/relay/${reqId}/download` : null,
+          ].filter(Boolean) as string[];
+
+          for (const ep of endpoints) {
+            try {
+              const resp = await fetch(ep);
+              if (resp.ok) {
+                cipherBuffer = await resp.arrayBuffer();
+                break;
+              }
+            } catch (e) {
+              lastErr = e;
+            }
           }
         }
 

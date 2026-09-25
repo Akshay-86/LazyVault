@@ -98,11 +98,31 @@ export class WebRTCReceiver {
         }
       };
 
-      this.pc.onconnectionstatechange = () => {
+      this.pc.onconnectionstatechange = async () => {
         if (this.pc) {
           console.log(`[WebRTC] Connection state: ${this.pc.connectionState}`);
           if (this.pc.connectionState === 'connected') {
-            this.updateProgress(25, 'Direct P2P DataChannel connection established!');
+            let connectionType = 'Direct P2P';
+            try {
+              const stats = await this.pc.getStats();
+              stats.forEach((report) => {
+                if (report.type === 'candidate-pair' && report.state === 'succeeded' && (report.selected || report.nominated)) {
+                  const localCand = stats.get(report.localCandidateId);
+                  const remoteCand = stats.get(report.remoteCandidateId);
+                  const localType = localCand?.candidateType || 'unknown';
+                  const remoteType = remoteCand?.candidateType || 'unknown';
+                  console.log(`[WebRTC] Active ICE Pair: Local=${localType} (${localCand?.ip || localCand?.address}:${localCand?.port}) <--> Remote=${remoteType} (${remoteCand?.ip || remoteCand?.address}:${remoteCand?.port})`);
+                  if (localType === 'host' && remoteType === 'host') {
+                    connectionType = 'Ultra-Fast Direct LAN';
+                  } else if (localType === 'srflx' || remoteType === 'srflx') {
+                    connectionType = 'Router NAT Hairpin';
+                  }
+                }
+              });
+            } catch (e) {
+              console.warn('[WebRTC] Stats inspection error:', e);
+            }
+            this.updateProgress(25, `${connectionType} connection established!`);
           } else if (this.pc.connectionState === 'failed') {
             this.onErrorCb?.(new Error('WebRTC direct P2P connection failed. Check device network.'));
           }
@@ -126,7 +146,7 @@ export class WebRTCReceiver {
             sdp: offer.sdp,
             type: offer.type,
           },
-          supportedTransports: ['webrtc'],
+          supportedTransports: ['webrtc', 'relay'],
           updatedAt: Date.now(),
         }, { merge: true });
 
@@ -262,7 +282,16 @@ export class WebRTCReceiver {
     channel.onerror = (err: any) => {
       console.warn('[WebRTC] DataChannel warning/error event:', err);
       if (channel.readyState === 'closed' || channel.readyState === 'closing') {
-        const detail = err?.error?.message || err?.message || 'DataChannel closed unexpectedly';
+        let detail = 'DataChannel closed unexpectedly';
+        try {
+          if (err && typeof err.message === 'string') {
+            detail = err.message;
+          } else if (err && err.error && typeof err.error.message === 'string') {
+            detail = err.error.message;
+          }
+        } catch {
+          // Firefox Restricted XPCOM RTCError object
+        }
         this.onErrorCb?.(new Error(`DataChannel closed: ${detail}`));
       }
     };

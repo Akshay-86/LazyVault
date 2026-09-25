@@ -13,6 +13,7 @@ import com.google.firebase.firestore.SetOptions
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.tasks.await
 import java.security.MessageDigest
+import android.util.Base64
 
 class FirebaseVaultManager(private val context: Context) {
     private val TAG = "FirebaseVaultManager"
@@ -303,6 +304,72 @@ class FirebaseVaultManager(private val context: Context) {
                     }
                 }
             }
+    }
+
+    suspend fun uploadEncryptedChunks(
+        requestId: String,
+        ciphertext: ByteArray,
+        keyB64: String,
+        ivB64: String,
+        targetSha256: String,
+        onProgress: (percent: Int, status: String) -> Unit
+    ): Boolean {
+        val vaultId = prefs.vaultId
+        return try {
+            val chunkSize = 512 * 1024 // 512 KB raw -> ~683 KB Base64 (well under 1MB Firestore doc limit)
+            val totalBytes = ciphertext.size
+            val chunkCount = if (totalBytes == 0) 1 else ((totalBytes + chunkSize - 1) / chunkSize)
+
+            val chunksCol = firestore.collection("vaults").document(vaultId)
+                .collection("requests").document(requestId)
+                .collection("chunks")
+
+            for (i in 0 until chunkCount) {
+                val start = i * chunkSize
+                val end = minOf(start + chunkSize, totalBytes)
+                val chunkBytes = ciphertext.copyOfRange(start, end)
+                val b64Chunk = Base64.encodeToString(chunkBytes, Base64.NO_WRAP)
+
+                val chunkDoc = mapOf(
+                    "index" to i,
+                    "data" to b64Chunk,
+                    "chunkBytes" to chunkBytes.size,
+                    "totalBytes" to totalBytes
+                )
+                chunksCol.document(i.toString()).set(chunkDoc).await()
+
+                val percent = 40 + (((i + 1).toDouble() / chunkCount) * 55).toInt()
+                onProgress(percent, "Uploading encrypted chunk ${i + 1}/$chunkCount...")
+            }
+
+            // Update request document with relay metadata
+            val relayMeta = mapOf(
+                "encryptionKeyB64" to keyB64,
+                "ivB64" to ivB64,
+                "chunkCount" to chunkCount,
+                "sizeBytes" to totalBytes.toLong(),
+                "sha256" to targetSha256
+            )
+
+            val updateMap = mapOf(
+                "status" to "COMPLETED",
+                "chosenTransport" to "relay",
+                "relayMetadata" to relayMeta,
+                "sha256" to targetSha256,
+                "updatedAt" to System.currentTimeMillis()
+            )
+
+            firestore.collection("vaults").document(vaultId)
+                .collection("requests").document(requestId)
+                .set(updateMap, SetOptions.merge())
+                .await()
+
+            Log.d(TAG, "Uploaded $chunkCount encrypted chunks to Firestore for $requestId")
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed uploading encrypted chunks for $requestId", e)
+            false
+        }
     }
 
     private fun hashPassword(password: String): String {
