@@ -133,6 +133,7 @@ class MainActivity : AppCompatActivity() {
         setupUi()
         schedulePeriodicBackgroundIndexing()
         fetchAndRegisterFcmToken()
+        startDaemonService()
 
         // Load cached catalog instantly with 0 CPU overhead; only index if first run
         val cached = storageManager.getCachedCatalog()
@@ -588,15 +589,29 @@ class MainActivity : AppCompatActivity() {
                 val oldId = prefs.vaultId
                 scope.launch {
                     withContext(Dispatchers.IO) {
-                        apiClient.revokeVault(prefs.backendUrl, oldId)
+                        FirebaseVaultManager(this@MainActivity).deleteVaultFromFirestore(oldId)
+                        if (prefs.backendUrl.isNotEmpty()) {
+                            apiClient.revokeVault(prefs.backendUrl, oldId)
+                        }
                     }
                     prefs.regenerateVaultId()
                     performCatalogIndexing()
-                    Toast.makeText(this@MainActivity, "Link revoked. New link generated!", Toast.LENGTH_SHORT).show()
+                    startDaemonService()
+                    Toast.makeText(this@MainActivity, "Old link deleted & revoked. New link generated!", Toast.LENGTH_SHORT).show()
                 }
             }
             .setNegativeButton("Cancel", null)
             .show()
+    }
+
+    private fun startDaemonService() {
+        try {
+            val daemonIntent = Intent(this, com.akshay.lazyvault.service.VaultDaemonService::class.java)
+            androidx.core.content.ContextCompat.startForegroundService(this, daemonIntent)
+            Log.d(TAG, "Started VaultDaemonService")
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed starting VaultDaemonService", e)
+        }
     }
 
     private fun simulateFcmWakeRequest() {

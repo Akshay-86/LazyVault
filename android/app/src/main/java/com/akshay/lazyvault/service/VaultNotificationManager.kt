@@ -15,11 +15,23 @@ import com.akshay.lazyvault.data.TransferRequest
 object VaultNotificationManager {
     const val CHANNEL_ID_REQUESTS = "lazyvault_requests_channel"
     const val CHANNEL_ID_TRANSFERS = "lazyvault_transfers_channel"
+    const val CHANNEL_ID_DAEMON = "lazyvault_daemon_channel"
     const val NOTIFICATION_ID_PROGRESS = 9999
+    const val NOTIFICATION_ID_DAEMON = 8888
 
     fun createNotificationChannels(context: Context) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+
+            val daemonChannel = NotificationChannel(
+                CHANNEL_ID_DAEMON,
+                "Vault Background Node Status",
+                NotificationManager.IMPORTANCE_LOW
+            ).apply {
+                description = "Shows persistent status that the mobile node is active and listening for secure requests"
+                setShowBadge(false)
+            }
+            notificationManager.createNotificationChannel(daemonChannel)
 
             val requestChannel = NotificationChannel(
                 CHANNEL_ID_REQUESTS,
@@ -126,6 +138,28 @@ object VaultNotificationManager {
             .setContentText(statusText)
             .setProgress(100, progressPercent, progressPercent == 0)
             .setOngoing(true)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .build()
+    }
+
+    fun buildDaemonNotification(context: Context, vaultId: String, deviceName: String): Notification {
+        createNotificationChannels(context)
+        val contentIntent = Intent(context, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP
+        }
+        val pendingIntent = PendingIntent.getActivity(
+            context,
+            0,
+            contentIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        return NotificationCompat.Builder(context, CHANNEL_ID_DAEMON)
+            .setSmallIcon(R.drawable.ic_launcher_foreground)
+            .setContentTitle("LazyVault Active · $deviceName")
+            .setContentText("Listening for zero-trust requests ($vaultId)")
+            .setOngoing(true)
+            .setContentIntent(pendingIntent)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .build()
     }

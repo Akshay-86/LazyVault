@@ -61,6 +61,12 @@
             android:exported="false"
             android:foregroundServiceType="dataSync" />
 
+        <!-- 24/7 Background Daemon Listener Service -->
+        <service
+            android:name=".service.VaultDaemonService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
         <!-- User-Initiated Data Transfer Job Service (Android 14+) -->
         <service
             android:name=".service.DataTransferJobService"

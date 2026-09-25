@@ -372,6 +372,17 @@ class FirebaseVaultManager(private val context: Context) {
         }
     }
 
+    suspend fun deleteVaultFromFirestore(targetVaultId: String = prefs.vaultId): Boolean {
+        return try {
+            firestore.collection("vaults").document(targetVaultId).delete().await()
+            Log.d(TAG, "Vault $targetVaultId deleted from Cloud Firestore")
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to delete vault $targetVaultId from Firestore", e)
+            false
+        }
+    }
+
     private fun hashPassword(password: String): String {
         if (password.isEmpty()) return ""
         val bytes = MessageDigest.getInstance("SHA-256").digest(password.toByteArray(Charsets.UTF_8))

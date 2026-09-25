@@ -2,9 +2,31 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
     match /vaults/{vaultId} {
-      allow read, write: if true;
-      
-      match /{allChildren=**} {
+      // Strictly disallow public listing of vaults
+      allow list: if false;
+
+      // Allow direct document lookup by exact vaultId
+      allow get: if !('expiresAt' in resource.data) || resource.data.expiresAt == 0 || request.time.toMillis() <= resource.data.expiresAt;
+
+      // Allow device management
+      allow write: if true;
+
+      // Scoped subcollections
+      match /requests/{requestId} {
+        allow read, write: if true;
+
+        match /chunks/{chunkId} {
+          allow read, write: if true;
+        }
+        match /callerCandidates/{candId} {
+          allow read, write: if true;
+        }
+        match /calleeCandidates/{candId} {
+          allow read, write: if true;
+        }
+      }
+
+      match /clients/{clientId} {
         allow read, write: if true;
       }
     }

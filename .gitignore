@@ -58,6 +58,7 @@ htmlcov/
 .venv/
 venv/
 env/
+cicd_download_*
 
 # --- Secrets, Credentials, & Private Keys (NEVER COMMIT) ---
 .env
