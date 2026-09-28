@@ -13,16 +13,28 @@ import {
   Check,
   Download,
   FolderOpen,
+  Link2,
 } from 'lucide-react';
 
 interface CatalogTableProps {
   files: CatalogItem[];
+  vaultId?: string | null;
   onRequestFile: (item: CatalogItem) => void;
 }
 
-export const CatalogTable: React.FC<CatalogTableProps> = ({ files, onRequestFile }) => {
+export const CatalogTable: React.FC<CatalogTableProps> = ({ files, vaultId, onRequestFile }) => {
   const [search, setSearch] = useState('');
   const [copiedHash, setCopiedHash] = useState<string | null>(null);
+  const [copiedLink, setCopiedLink] = useState<string | null>(null);
+
+  const copyFileLink = (file: CatalogItem) => {
+    const origin = window.location.origin;
+    const base = vaultId ? `${origin}/v/${vaultId}` : window.location.href.split('?')[0];
+    const url = `${base}?file=${encodeURIComponent(file.name)}`;
+    navigator.clipboard.writeText(url);
+    setCopiedLink(file.sha256);
+    setTimeout(() => setCopiedLink(null), 2000);
+  };
 
   const getFileIcon = (name: string) => {
     const ext = name.split('.').pop()?.toLowerCase() || '';
@@ -170,13 +182,34 @@ export const CatalogTable: React.FC<CatalogTableProps> = ({ files, onRequestFile
 
                   {/* Action */}
                   <td className="py-3 px-4 text-right whitespace-nowrap">
-                    <button
-                      onClick={() => onRequestFile(file)}
-                      className="inline-flex items-center space-x-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-500 active:bg-blue-700 text-white font-medium text-xs rounded-lg transition shadow-sm"
-                    >
-                      <Download className="h-3.5 w-3.5" />
-                      <span>Download</span>
-                    </button>
+                    <div className="inline-flex items-center justify-end space-x-2">
+                      <button
+                        type="button"
+                        onClick={() => copyFileLink(file)}
+                        title="Copy shareable link for this file"
+                        className="inline-flex items-center space-x-1.5 px-2.5 py-1.5 bg-slate-800 hover:bg-slate-700 active:bg-slate-600 border border-slate-700/80 text-slate-300 hover:text-white font-medium text-xs rounded-lg transition shadow-sm"
+                      >
+                        {copiedLink === file.sha256 ? (
+                          <>
+                            <Check className="h-3.5 w-3.5 text-emerald-400" />
+                            <span className="text-emerald-400">Copied!</span>
+                          </>
+                        ) : (
+                          <>
+                            <Link2 className="h-3.5 w-3.5 text-slate-400 group-hover:text-slate-300" />
+                            <span>Copy Link</span>
+                          </>
+                        )}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => onRequestFile(file)}
+                        className="inline-flex items-center space-x-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-500 active:bg-blue-700 text-white font-medium text-xs rounded-lg transition shadow-sm"
+                      >
+                        <Download className="h-3.5 w-3.5" />
+                        <span>Download</span>
+                      </button>
+                    </div>
                   </td>
                 </tr>
               ))}

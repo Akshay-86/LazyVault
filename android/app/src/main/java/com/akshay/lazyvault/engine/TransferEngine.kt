@@ -33,7 +33,7 @@ class TransferEngine(private val context: Context) {
 
     companion object {
         const val CHUNK_SIZE = 64 * 1024 // 64KB chunks for optimal throughput on high-speed Wi-Fi and direct LAN
-        const val BUFFERED_AMOUNT_LOW_THRESHOLD = 4 * 1024 * 1024L // 4MB backpressure window (supports high BDP links)
+        const val BUFFERED_AMOUNT_LOW_THRESHOLD = 1024 * 1024L // 1MB backpressure window to prevent socket buffer saturation and ICE consent starvation (RFC 7675)
         const val MAX_RELAY_FILE_SIZE_BYTES = 50 * 1024 * 1024L // 50MB maximum for cloud chunk relay to protect memory & quota
     }
 
@@ -144,10 +144,7 @@ class TransferEngine(private val context: Context) {
 
             val iceServers = listOf(
                 PeerConnection.IceServer.builder("stun:stun.l.google.com:19302").createIceServer(),
-                PeerConnection.IceServer.builder("stun:stun1.l.google.com:19302").createIceServer(),
-                PeerConnection.IceServer.builder("stun:stun2.l.google.com:19302").createIceServer(),
-                PeerConnection.IceServer.builder("stun:stun.cloudflare.com:3478").createIceServer(),
-                PeerConnection.IceServer.builder("stun:global.stun.twilio.com:3478").createIceServer()
+                PeerConnection.IceServer.builder("stun:stun.cloudflare.com:3478").createIceServer()
             )
 
             val rtcConfig = PeerConnection.RTCConfiguration(iceServers).apply {
@@ -391,6 +388,7 @@ class TransferEngine(private val context: Context) {
             val buffer = ByteArray(CHUNK_SIZE)
             var lastProgressTime = 0L
             var lastPercent = -1
+            var chunksSinceYield = 0
 
             inputStream.use { fis ->
                 var read: Int
@@ -406,15 +404,30 @@ class TransferEngine(private val context: Context) {
 
                     // Backpressure check: wait if bufferedAmount exceeds threshold
                     while (dc.bufferedAmount() > BUFFERED_AMOUNT_LOW_THRESHOLD) {
+                        if (dc.state() != DataChannel.State.OPEN) break
                         delay(2)
                     }
 
                     // Retry sending until accepted by DataChannel buffer
+                    var retryCount = 0
                     while (!dc.send(dataBuffer)) {
                         if (dc.state() != DataChannel.State.OPEN) break
                         delay(2)
+                        retryCount++
+                        if (retryCount > 1000) { // 2s without accepting data
+                            Log.e(TAG, "DataChannel send stalled, state: ${dc.state()}")
+                            break
+                        }
                     }
                     bytesSent += read
+
+                    // Cooperative pacing: yield every 32 chunks (~2MB) to give the native WebRTC
+                    // network thread time to process ICE consent checks (RFC 7675) & SCTP SACK acks
+                    chunksSinceYield++
+                    if (chunksSinceYield >= 32) {
+                        chunksSinceYield = 0
+                        delay(1)
+                    }
 
                     val now = System.currentTimeMillis()
                     val percent = 30 + ((bytesSent.toDouble() / maxOf(1L, fileLength)) * 60).toInt()

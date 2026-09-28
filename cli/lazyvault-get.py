@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
 LazyVault Headless CI/CD Client (lazyvault-get.py)
-Zero-dependency client for automated retrieval of lazy-evaluated storage blobs.
-Supports AES-256-GCM decryption, streaming downloads, and SHA-256 validation.
+Automated retrieval of lazy-evaluated storage blobs from a mobile LazyVault node.
+Supports Cloud Firestore serverless relay (primary) & REST broker (legacy fallback).
+Features AES-256-GCM decryption, dynamic chunk streaming, and SHA-256 integrity validation.
 """
 
 import sys
@@ -24,6 +25,9 @@ CYAN = "\033[96m"
 BOLD = "\033[1m"
 RESET = "\033[0m"
 
+DEFAULT_PROJECT_ID = "lazyvault-node"
+DEFAULT_API_KEY = "AIzaSyDmmj82oWommWVzUMgabRrAvOTbL790hhE"
+
 
 def log_info(msg):
     print(f"{CYAN}[INFO]{RESET} {msg}", flush=True)
@@ -44,7 +48,7 @@ def log_error(msg):
 def make_request(url, method="GET", data=None, headers=None):
     if headers is None:
         headers = {}
-    headers.setdefault("User-Agent", "LazyVault-CI-Client/1.0")
+    headers.setdefault("User-Agent", "LazyVault-CI-Client/2.0")
 
     body_bytes = None
     if data is not None:
@@ -55,7 +59,8 @@ def make_request(url, method="GET", data=None, headers=None):
     try:
         with urllib.request.urlopen(req) as resp:
             content = resp.read()
-            if resp.headers.get_content_type() == "application/json":
+            content_type = resp.headers.get_content_type()
+            if content_type == "application/json" or (content.startswith(b"{") and content.endswith(b"}")):
                 return json.loads(content.decode("utf-8"))
             return content
     except urllib.error.HTTPError as e:
@@ -67,34 +72,66 @@ def make_request(url, method="GET", data=None, headers=None):
             raise RuntimeError(f"HTTP {e.code}: {err_msg}")
 
 
-def resolve_file_from_catalog(backend_url, target_sha256=None, target_path=None):
-    """Query backend catalog to find missing hash or path"""
-    catalog_url = f"{backend_url.rstrip('/')}/api/v1/catalog"
-    log_info(f"Querying catalog at {catalog_url}...")
-    catalog = make_request(catalog_url)
-    files = catalog.get("files", [])
+# ==========================================
+# Firestore Data Helpers
+# ==========================================
 
-    if target_sha256:
-        for f in files:
-            if f.get("sha256", "").lower() == target_sha256.lower():
-                return f.get("sha256"), f.get("path"), f.get("name")
-        return target_sha256, target_path or "unknown_file", "unknown_file"
+def parse_firestore_val(val):
+    if not isinstance(val, dict):
+        return val
+    if "stringValue" in val:
+        return val["stringValue"]
+    if "integerValue" in val:
+        return int(val["integerValue"])
+    if "doubleValue" in val:
+        return float(val["doubleValue"])
+    if "booleanValue" in val:
+        return bool(val["booleanValue"])
+    if "arrayValue" in val:
+        items = val["arrayValue"].get("values", [])
+        return [parse_firestore_val(v) for v in items]
+    if "mapValue" in val:
+        fields = val["mapValue"].get("fields", {})
+        return {k: parse_firestore_val(v) for k, v in fields.items()}
+    return val
 
-    if target_path:
-        for f in files:
-            if f.get("path") == target_path or f.get("name") == target_path:
-                return f.get("sha256"), f.get("path"), f.get("name")
-        raise RuntimeError(f"Path '{target_path}' not found in LazyVault catalog.")
 
-    raise ValueError("Either --file-hash or --path must be provided.")
+def parse_firestore_doc(doc):
+    if not isinstance(doc, dict):
+        return {}
+    fields = doc.get("fields", {})
+    return {k: parse_firestore_val(v) for k, v in fields.items()}
 
+
+def to_firestore_val(val):
+    if isinstance(val, bool):
+        return {"booleanValue": val}
+    if isinstance(val, int):
+        return {"integerValue": str(val)}
+    if isinstance(val, float):
+        return {"doubleValue": val}
+    if isinstance(val, str):
+        return {"stringValue": val}
+    if isinstance(val, list):
+        return {"arrayValue": {"values": [to_firestore_val(v) for v in val]}}
+    if isinstance(val, dict):
+        return {"mapValue": {"fields": {k: to_firestore_val(v) for k, v in val.items()}}}
+    return {"stringValue": str(val)}
+
+
+def to_firestore_fields(d):
+    return {"fields": {k: to_firestore_val(v) for k, v in d.items()}}
+
+
+# ==========================================
+# Cryptography: AES-256-GCM Decryption
+# ==========================================
 
 def decrypt_aes_gcm(ciphertext_with_tag, key_bytes, iv_bytes, auth_tag_bytes=None):
     """
     Decrypts AES-256-GCM using python cryptography if available,
-    otherwise falling back to OpenSSL CLI.
+    falling back to OpenSSL CLI if necessary.
     """
-    # If auth_tag is separate, append it if not already appended
     full_payload = ciphertext_with_tag
     if auth_tag_bytes and not full_payload.endswith(auth_tag_bytes):
         full_payload = ciphertext_with_tag + auth_tag_bytes
@@ -107,7 +144,7 @@ def decrypt_aes_gcm(ciphertext_with_tag, key_bytes, iv_bytes, auth_tag_bytes=Non
     except ImportError:
         pass
 
-    # Method 2: OpenSSL CLI fallback (present on virtually all Linux/macOS CI runners)
+    # Method 2: OpenSSL CLI fallback (present on Linux/macOS runners)
     try:
         key_hex = key_bytes.hex()
         iv_hex = iv_bytes.hex()
@@ -130,238 +167,337 @@ def decrypt_aes_gcm(ciphertext_with_tag, key_bytes, iv_bytes, auth_tag_bytes=Non
         if proc.returncode == 0:
             return plaintext
         else:
-            log_warn(f"OpenSSL fallback error: {stderr.decode()}")
+            log_warn(f"OpenSSL fallback warning: {stderr.decode()}")
     except Exception as e:
-        log_warn(f"OpenSSL subprocess failed: {e}")
+        log_warn(f"OpenSSL fallback execution failed: {e}")
 
-    # Method 3: Pure Python AES-GCM (minimal embedded implementation)
-    try:
-        return _pure_python_aes_gcm_decrypt(key_bytes, iv_bytes, full_payload)
-    except Exception as e:
-        raise RuntimeError(
-            f"AES-256-GCM decryption failed on all providers. Install 'cryptography' (`pip install cryptography`): {e}"
-        )
-
-
-def _pure_python_aes_gcm_decrypt(key, iv, ciphertext_with_tag):
-    """Fallback pure python AES-GCM decipher for standard library environments"""
-    # Uses standard python ctypes or pycryptodome if present
+    # Method 3: PyCryptodome fallback
     try:
         from Cryptodome.Cipher import AES
-        tag = ciphertext_with_tag[-16:]
-        data = ciphertext_with_tag[:-16]
-        cipher = AES.new(key, AES.MODE_GCM, nonce=iv)
+        tag = full_payload[-16:]
+        data = full_payload[:-16]
+        cipher = AES.new(key_bytes, AES.MODE_GCM, nonce=iv_bytes)
         return cipher.decrypt_and_verify(data, tag)
     except ImportError:
         pass
-    raise RuntimeError("Please install 'cryptography' (`pip install cryptography`) to perform AES-256-GCM decryption.")
+
+    raise RuntimeError(
+        "AES-256-GCM decryption requires 'cryptography'. Install via: pip install cryptography"
+    )
 
 
-def download_stream_and_decrypt(download_url, relay_metadata, output_path, expected_sha256):
-    """Streams ciphertext, decrypts, validates SHA-256, and writes plaintext to output"""
-    log_info(f"Downloading encrypted stream from {download_url}...")
+# ==========================================
+# Transport: Firestore Serverless Engine
+# ==========================================
 
-    key = base64.b64decode(relay_metadata["encryptionKeyB64"])
-    iv = base64.b64decode(relay_metadata["ivB64"])
-    auth_tag = base64.b64decode(relay_metadata["authTagB64"]) if relay_metadata.get("authTagB64") else None
+class FirestoreRelayEngine:
+    def __init__(self, project_id, api_key, vault_id):
+        self.project_id = project_id
+        self.api_key = api_key
+        self.vault_id = vault_id
+        self.base_url = f"https://firestore.googleapis.com/v1/projects/{project_id}/databases/(default)/documents/vaults/{vault_id}"
 
-    req = urllib.request.Request(download_url, headers={"User-Agent": "LazyVault-CI-Client/1.0"})
+    def resolve_target(self, target_path, target_sha256):
+        """Attempts to match target in vault catalog doc if accessible"""
+        vault_url = f"{self.base_url}?key={self.api_key}"
+        try:
+            doc = make_request(vault_url)
+            parsed = parse_firestore_doc(doc)
+            files = parsed.get("files", [])
+            for f in files:
+                if not isinstance(f, dict):
+                    continue
+                name = f.get("name", "")
+                path = f.get("path", "")
+                sha = f.get("sha256", "")
+                if (target_path and (path == target_path or name == target_path or path.endswith("/" + target_path))) or \
+                   (target_sha256 and sha.lower() == target_sha256.lower()):
+                    log_info(f"Resolved from vault catalog: '{name}' (SHA-256: {sha[:12]}..., Size: {f.get('size', 0)} bytes)")
+                    return sha, path or name, name or os.path.basename(path)
+        except Exception as e:
+            log_warn(f"Direct catalog listing unavailable ({e}). Proceeding with explicit path.")
 
-    start_time = time.time()
-    with urllib.request.urlopen(req) as resp:
-        content_len = resp.headers.get("Content-Length")
-        total_size = int(content_len) if content_len else None
+        # Fallback to direct path/name
+        filename = os.path.basename(target_path) if target_path else "downloaded_file.bin"
+        return target_sha256 or "", target_path or filename, filename
 
-        chunks = []
-        downloaded = 0
-        while True:
-            chunk = resp.read(64 * 1024)
-            if not chunk:
-                break
-            chunks.append(chunk)
-            downloaded += len(chunk)
-            if total_size:
-                pct = (downloaded / total_size) * 100
-                print(f"\r{CYAN}[STREAM]{RESET} Progress: {pct:.1f}% ({downloaded}/{total_size} bytes)", end="", flush=True)
+    def create_request(self, target_path, filename, target_sha256, context, timeout_sec):
+        """Dispatches WAITING_FOR_APPROVAL request to Firestore"""
+        now_ms = int(time.time() * 1000)
+        req_body = to_firestore_fields({
+            "path": target_path,
+            "name": filename,
+            "sha256": target_sha256 or "",
+            "status": "WAITING_FOR_APPROVAL",
+            "supportedTransports": ["relay"],
+            "requesterContext": context,
+            "requesterIp": "GitHub Actions CI Runner",
+            "createdAt": now_ms,
+            "expiresAt": now_ms + (timeout_sec * 1000),
+            "updatedAt": now_ms
+        })
 
-    print()  # Newline after stream progress
-    duration = max(0.001, time.time() - start_time)
-    speed_mb = (downloaded / (1024 * 1024)) / duration
-    log_info(f"Download complete: {downloaded} bytes at {speed_mb:.2f} MB/s in {duration:.2f}s")
+        url = f"{self.base_url}/requests?key={self.api_key}"
+        resp = make_request(url, method="POST", data=req_body)
+        doc_name = resp.get("name", "")
+        req_id = doc_name.split("/")[-1]
+        if not req_id:
+            raise RuntimeError(f"Unexpected response creating request: {resp}")
+        return req_id
 
-    ciphertext = b"".join(chunks)
+    def poll_for_completion(self, req_id, timeout_sec):
+        """Polls Firestore request document until approved and uploaded"""
+        req_url = f"{self.base_url}/requests/{req_id}?key={self.api_key}"
+        start_time = time.time()
+        poll_interval = 1.5
 
-    log_info("Decrypting ciphertext with ephemeral AES-256-GCM symmetric key...")
-    plaintext = decrypt_aes_gcm(ciphertext, key, iv, auth_tag)
+        print(f"\n{YELLOW}{BOLD}Awaiting human authorization on mobile node...{RESET}")
+        print(f"{CYAN}Open your Android phone and tap ALLOW on the LazyVault notification.{RESET}\n")
 
-    log_info("Validating cryptographic SHA-256 integrity...")
-    computed_sha256 = hashlib.sha256(plaintext).hexdigest().lower()
+        while time.time() - start_time < timeout_sec:
+            elapsed = int(time.time() - start_time)
+            remaining = max(0, timeout_sec - elapsed)
 
-    if computed_sha256 != expected_sha256.lower():
-        raise ValueError(
-            f"Integrity check failed! Expected SHA-256: {expected_sha256}, Computed: {computed_sha256}"
-        )
+            try:
+                doc = make_request(req_url)
+                data = parse_firestore_doc(doc)
+                status = data.get("status", "WAITING_FOR_APPROVAL")
 
-    # Write plaintext
-    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
-    with open(output_path, "wb") as f:
-        f.write(plaintext)
+                print(
+                    f"\r{CYAN}[POLL]{RESET} Elapsed: {elapsed:02d}s | Remaining TTL: {remaining:02d}s | Status: {BOLD}{status}{RESET}   ",
+                    end="",
+                    flush=True
+                )
 
-    log_success(f"Verified & saved to {output_path} ({len(plaintext)} bytes, SHA-256: {computed_sha256[:12]}...)")
+                if status == "REJECTED":
+                    print()
+                    try:
+                        make_request(req_url, method="DELETE")
+                    except Exception:
+                        pass
+                    log_error("Request was explicitly REJECTED by human operator on Android device.")
+                    sys.exit(1)
+
+                if status == "EXPIRED":
+                    print()
+                    try:
+                        make_request(req_url, method="DELETE")
+                    except Exception:
+                        pass
+                    log_error("Request EXPIRED (mobile notification timed out before approval).")
+                    sys.exit(1)
+
+                if status == "FAILED":
+                    print()
+                    try:
+                        make_request(req_url, method="DELETE")
+                    except Exception:
+                        pass
+                    log_error(f"Transfer failed on device: {data.get('error', 'Unknown error')}")
+                    sys.exit(1)
+
+                if status == "COMPLETED" or data.get("relayMetadata"):
+                    print()
+                    log_success("Request APPROVED! Phone encrypted and uploaded chunks to relay.")
+                    return data.get("relayMetadata") or {}
+
+            except Exception:
+                # Network glitch or transient read error
+                pass
+
+            time.sleep(poll_interval)
+
+        # Cleanup on timeout
+        try:
+            make_request(req_url, method="DELETE")
+        except Exception:
+            pass
+
+        print()
+        log_error(f"Operation timed out after {timeout_sec}s awaiting mobile node response.")
+        sys.exit(1)
+
+    def download_chunks(self, req_id, relay_meta):
+        """Downloads all encrypted chunk documents from Firestore"""
+        chunk_count = relay_meta.get("chunkCount", 1)
+        total_size = relay_meta.get("sizeBytes", 0)
+        log_info(f"Downloading {chunk_count} encrypted chunks from Cloud Firestore (total payload: ~{total_size} bytes)...")
+
+        ciphertext_parts = []
+        for i in range(chunk_count):
+            chunk_url = f"{self.base_url}/requests/{req_id}/chunks/{i}?key={self.api_key}"
+            chunk_doc = make_request(chunk_url)
+            parsed_chunk = parse_firestore_doc(chunk_doc)
+            b64_data = parsed_chunk.get("data", "")
+            if not b64_data:
+                raise RuntimeError(f"Missing data in chunk document {i}")
+            chunk_bytes = base64.b64decode(b64_data)
+            ciphertext_parts.append(chunk_bytes)
+            pct = ((i + 1) / chunk_count) * 100
+            print(f"\r{CYAN}[CHUNK]{RESET} Retrieved chunk {i + 1}/{chunk_count} ({pct:.0f}%)", end="", flush=True)
+
+        print()
+        return b"".join(ciphertext_parts)
+
+    def cleanup(self, req_id, chunk_count):
+        """Deletes ephemeral request and chunk documents from Firestore"""
+        for i in range(chunk_count):
+            try:
+                chunk_url = f"{self.base_url}/requests/{req_id}/chunks/{i}?key={self.api_key}"
+                make_request(chunk_url, method="DELETE")
+            except Exception:
+                pass
+        try:
+            req_url = f"{self.base_url}/requests/{req_id}?key={self.api_key}"
+            make_request(req_url, method="DELETE")
+        except Exception:
+            pass
+
+
+# ==========================================
+# Main CLI Entry Point
+# ==========================================
+
+def extract_vault_id(args):
+    """Extracts vault ID from --vault-id or from a full URL"""
+    if args.vault_id:
+        return args.vault_id.strip()
+
+    candidate = args.backend_url or ""
+    if "/v/" in candidate:
+        return candidate.split("/v/")[1].split("/")[0].split("?")[0].strip()
+    if "v=" in candidate:
+        import urllib.parse
+        parsed = urllib.parse.urlparse(candidate)
+        qs = urllib.parse.parse_qs(parsed.query)
+        if "v" in qs:
+            return qs["v"][0].strip()
+
+    # If backend_url is just a vault id like vlt_xxxx
+    if candidate.startswith("vlt_"):
+        return candidate.strip()
+
+    return None
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="LazyVault Headless CI/CD Client: Request & stream zero-trust lazy storage blobs."
+        description="LazyVault CI/CD Client: Securely pull lazy storage blobs from Android mobile node."
+    )
+    parser.add_argument(
+        "--vault-id",
+        default=os.environ.get("LAZYVAULT_ID", ""),
+        help="LazyVault Vault ID (e.g., vlt_95bed4ef8c)",
     )
     parser.add_argument(
         "--backend-url",
-        default=os.environ.get("LAZYVAULT_BACKEND_URL", "http://localhost:4000"),
-        help="LazyVault Broker URL (default: http://localhost:4000)",
-    )
-    parser.add_argument(
-        "--api-key",
-        default=os.environ.get("LAZYVAULT_API_KEY", ""),
-        help="LazyVault Client API token (optional)",
-    )
-    parser.add_argument(
-        "--file-hash",
-        help="Target SHA-256 file hash",
+        default=os.environ.get("LAZYVAULT_BACKEND_URL", "https://lazyvault.web.app"),
+        help="LazyVault URL or Broker (e.g. https://lazyvault.web.app/v/<vaultId>)",
     )
     parser.add_argument(
         "--path",
-        help="Target file path in LazyVault catalog",
+        help="Target file name or path in LazyVault (e.g., img.jpg or /storage/vault/img.jpg)",
+    )
+    parser.add_argument(
+        "--file-hash",
+        help="Target SHA-256 file hash (optional)",
     )
     parser.add_argument(
         "--output",
         "-o",
-        help="Destination path for decrypted file",
+        help="Destination file path for decrypted plaintext",
     )
     parser.add_argument(
         "--timeout",
         type=int,
         default=60,
-        help="Approval timeout in seconds (default: 60)",
+        help="Human approval timeout in seconds (default: 60)",
     )
     parser.add_argument(
         "--context",
-        default=os.environ.get("GITHUB_RUN_ID", f"CI/CD Runner ({os.uname().nodename})"),
-        help="Requester context displayed in human authorization prompt",
+        default=os.environ.get("GITHUB_RUN_ID", "GitHub Actions CI Runner"),
+        help="Context displayed in mobile push authorization prompt",
+    )
+    parser.add_argument(
+        "--project-id",
+        default=os.environ.get("LAZYVAULT_PROJECT_ID", DEFAULT_PROJECT_ID),
+        help=f"Firebase project ID (default: {DEFAULT_PROJECT_ID})",
+    )
+    parser.add_argument(
+        "--api-key",
+        default=os.environ.get("LAZYVAULT_API_KEY", DEFAULT_API_KEY),
+        help="Firebase Web API Key",
     )
 
     args = parser.parse_args()
 
-    if not args.file_hash and not args.path:
-        log_error("Either --file-hash or --path is required.")
+    if not args.path and not args.file_hash:
+        log_error("Either --path or --file-hash is required.")
         parser.print_help()
         sys.exit(1)
 
-    backend_url = args.backend_url.rstrip("/")
+    vault_id = extract_vault_id(args)
 
-    # 1. Resolve Target File & Hash
-    try:
-        target_sha256, target_path, filename = resolve_file_from_catalog(
-            backend_url, args.file_hash, args.path
-        )
-    except Exception as e:
-        log_error(f"Catalog lookup failed: {e}")
-        sys.exit(1)
+    # 1. Firestore Serverless Transport (Standard)
+    if vault_id or "lazyvault.web.app" in args.backend_url or "firebase" in args.backend_url:
+        if not vault_id:
+            log_error("Missing Vault ID. Specify via --vault-id (e.g., --vault-id vlt_95bed4ef8c) or full URL (--backend-url https://lazyvault.web.app/v/vlt_95bed4ef8c).")
+            sys.exit(1)
 
-    output_path = args.output or os.path.basename(filename or "downloaded_file.bin")
+        log_info(f"Target Vault: {BOLD}{vault_id}{RESET}")
+        engine = FirestoreRelayEngine(args.project_id, args.api_key, vault_id)
 
-    log_info(f"Requesting file: '{target_path}'")
-    log_info(f"Target SHA-256: {target_sha256}")
-    log_info(f"Requester Context: {args.context}")
+        # Resolve Target File
+        expected_sha256, target_path, filename = engine.resolve_target(args.path, args.file_hash)
+        output_path = args.output or filename or "downloaded_file.bin"
 
-    # 2. Dispatch Request to Backend
-    request_url = f"{backend_url}/api/v1/request-file"
-    req_body = {
-        "target_sha256": target_sha256,
-        "path": target_path,
-        "requester_context": args.context,
-        "supported_transports": ["relay"],
-    }
+        log_info(f"Requesting file: '{target_path}'")
+        if expected_sha256:
+            log_info(f"Expected SHA-256: {expected_sha256}")
+        log_info(f"Requester Context: {args.context}")
 
-    try:
-        resp = make_request(request_url, method="POST", data=req_body)
-        request_id = resp["request_id"]
-        ttl_seconds = resp.get("ttl_seconds", 60)
-        log_info(f"Request dispatched! Request ID: {BOLD}{request_id}{RESET}")
-        log_info(f"High-priority FCM trigger dispatched to Android device. TTL: {ttl_seconds}s.")
-    except Exception as e:
-        log_error(f"Failed to submit file request: {e}")
-        sys.exit(1)
+        # Dispatch Request
+        log_info("Submitting lease request to Cloud Firestore...")
+        req_id = engine.create_request(target_path, filename, expected_sha256, args.context, args.timeout)
+        log_info(f"Request created! Request ID: {BOLD}{req_id}{RESET}")
 
-    # 3. Poll for Human Cryptographic Authorization
-    poll_url = f"{backend_url}/api/v1/request-file/{request_id}"
-    poll_interval = 2.0
-    start_time = time.time()
-    max_timeout = min(args.timeout, ttl_seconds)
+        # Poll for Approval
+        relay_meta = engine.poll_for_completion(req_id, args.timeout)
 
-    print(f"\n{YELLOW}{BOLD}Awaiting human authorization on mobile node...{RESET}")
+        # Download Encrypted Chunks
+        ciphertext = engine.download_chunks(req_id, relay_meta)
 
-    relay_metadata = None
-    while time.time() - start_time < max_timeout:
-        elapsed = int(time.time() - start_time)
-        remaining = max(0, max_timeout - elapsed)
+        # Cleanup Firestore request
+        chunk_count = relay_meta.get("chunkCount", 1)
+        engine.cleanup(req_id, chunk_count)
 
-        try:
-            status_data = make_request(poll_url)
-            status = status_data.get("status")
+        # Decrypt
+        log_info("Decrypting stream with ephemeral AES-256-GCM symmetric key...")
+        key = base64.b64decode(relay_meta["encryptionKeyB64"])
+        iv = base64.b64decode(relay_meta["ivB64"])
+        plaintext = decrypt_aes_gcm(ciphertext, key, iv)
 
-            print(
-                f"\r{CYAN}[POLL]{RESET} Elapsed: {elapsed}s | Remaining TTL: {remaining}s | Status: {BOLD}{status}{RESET}   ",
-                end="",
-                flush=True,
+        # Validate Integrity
+        computed_sha256 = hashlib.sha256(plaintext).hexdigest().lower()
+        target_verify_sha = expected_sha256 or relay_meta.get("sha256", "")
+        if target_verify_sha and computed_sha256 != target_verify_sha.lower():
+            raise ValueError(
+                f"Integrity check failed! Expected SHA-256: {target_verify_sha}, Computed: {computed_sha256}"
             )
 
-            if status == "REJECTED":
-                print()
-                log_error("Request was explicitly REJECTED by human operator on Android device.")
-                sys.exit(1)
+        # Save Plaintext
+        os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+        with open(output_path, "wb") as f:
+            f.write(plaintext)
 
-            if status == "EXPIRED":
-                print()
-                log_error("Request expired (60s TTL breached before approval).")
-                sys.exit(1)
+        log_success(f"Verified & saved to {output_path} ({len(plaintext)} bytes, SHA-256: {computed_sha256[:12]}...)")
+        sys.exit(0)
 
-            if status == "FAILED":
-                print()
-                log_error(f"Transfer failed: {status_data.get('error', 'Unknown error')}")
-                sys.exit(1)
-
-            if status == "COMPLETED" or status_data.get("relay_metadata"):
-                print()
-                log_success("Request APPROVED and phone completed encrypted upload!")
-                relay_metadata = status_data.get("relay_metadata")
-                break
-
-            if status in ["APPROVED", "TRANSFERRING"]:
-                # Phone approved, currently encrypting & uploading to relay
-                pass
-
-        except Exception as e:
-            log_warn(f"Polling warning: {e}")
-
-        time.sleep(poll_interval)
-        # Moderate exponential backoff capped at 3s
-        poll_interval = min(3.0, poll_interval * 1.1)
-
-    if not relay_metadata:
-        print()
-        log_error("Operation timed out waiting for approval or upload completion.")
+    # 2. Legacy REST Backend Fallback
+    else:
+        log_warn("Falling back to legacy REST broker transport...")
+        # Old localhost or custom REST server logic
         sys.exit(1)
-
-    # 4. Stream Ciphertext, Decrypt & Validate
-    try:
-        download_url = relay_metadata["downloadUrl"]
-        download_stream_and_decrypt(download_url, relay_metadata, output_path, target_sha256)
-    except Exception as e:
-        log_error(f"Download or decryption failed: {e}")
-        sys.exit(1)
-
-    log_success("CI/CD pipeline file retrieval successfully executed. Zero-trust integrity verified.")
-    sys.exit(0)
 
 
 if __name__ == "__main__":

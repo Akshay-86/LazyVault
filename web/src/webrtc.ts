@@ -25,7 +25,10 @@ export class WebRTCReceiver {
   private expectedSha256: string;
   private filename: string;
   private totalSize: number;
-  private receivedChunks: ArrayBuffer[] = [];
+  private currentBatch: ArrayBuffer[] = [];
+  private blobParts: Blob[] = [];
+  private currentBatchBytes = 0;
+  private readonly BATCH_SIZE_BYTES = 32 * 1024 * 1024; // 32MB batching to avoid heap GC pressure on 3GB+ files
   private bytesReceived = 0;
   private startTime = 0;
   private sseSource: EventSource | null = null;
@@ -68,10 +71,7 @@ export class WebRTCReceiver {
       const config: RTCConfiguration = {
         iceServers: [
           { urls: 'stun:stun.l.google.com:19302' },
-          { urls: 'stun:stun1.l.google.com:19302' },
-          { urls: 'stun:stun2.l.google.com:19302' },
           { urls: 'stun:stun.cloudflare.com:3478' },
-          { urls: 'stun:global.stun.twilio.com:3478' },
         ],
       };
 
@@ -250,11 +250,19 @@ export class WebRTCReceiver {
       }
 
       if (data instanceof ArrayBuffer) {
-        this.receivedChunks.push(data);
+        this.currentBatch.push(data);
+        this.currentBatchBytes += data.byteLength;
         this.bytesReceived += data.byteLength;
 
+        // Merge every 32MB into a native Blob to keep JS heap footprint near zero
+        if (this.currentBatchBytes >= this.BATCH_SIZE_BYTES) {
+          this.blobParts.push(new Blob(this.currentBatch));
+          this.currentBatch = [];
+          this.currentBatchBytes = 0;
+        }
+
         const now = Date.now();
-        if (now - this.lastProgressUpdate >= 100 || (this.totalSize > 0 && this.bytesReceived >= this.totalSize)) {
+        if (now - this.lastProgressUpdate >= 150 || (this.totalSize > 0 && this.bytesReceived >= this.totalSize)) {
           this.lastProgressUpdate = now;
           const durationSec = Math.max(0.001, (now - this.startTime) / 1000);
           const speedMbps = ((this.bytesReceived * 8) / (1024 * 1024)) / durationSec;
@@ -272,7 +280,7 @@ export class WebRTCReceiver {
         // Auto EOF check if total size reached
         if (this.totalSize > 0 && this.bytesReceived >= this.totalSize) {
           setTimeout(() => {
-            if (this.receivedChunks.length > 0) {
+            if (this.blobParts.length > 0 || this.currentBatch.length > 0) {
               this.handleTransferCompletion();
             }
           }, 300);
@@ -303,12 +311,19 @@ export class WebRTCReceiver {
   }
 
   private async handleTransferCompletion(reportedSha?: string) {
-    if (this.receivedChunks.length === 0) return;
+    if (this.blobParts.length === 0 && this.currentBatch.length === 0) return;
 
     this.updateProgress(100, 'Verifying cryptographic SHA-256 integrity...');
 
-    const blob = new Blob(this.receivedChunks, { type: 'application/octet-stream' });
-    this.receivedChunks = []; // Free memory
+    // Flush any remaining chunks into blobParts
+    if (this.currentBatch.length > 0) {
+      this.blobParts.push(new Blob(this.currentBatch));
+      this.currentBatch = [];
+      this.currentBatchBytes = 0;
+    }
+
+    const blob = new Blob(this.blobParts, { type: 'application/octet-stream' });
+    this.blobParts = []; // Free memory
 
     // Compute SHA-256 via Web Crypto API (for files < 150MB to prevent memory exhaustion on 700MB+ transfers)
     let computedSha256 = '';
@@ -448,5 +463,8 @@ export class WebRTCReceiver {
       this.pc.close();
       this.pc = null;
     }
+    this.blobParts = [];
+    this.currentBatch = [];
+    this.currentBatchBytes = 0;
   }
 }

@@ -1,6 +1,6 @@
 # LazyVault Headless CI/CD Client
 
-The LazyVault CLI allows automated CI/CD runners (GitHub Actions, GitLab CI, Buildkite, Jenkins) to securely pull lazy-evaluated storage blobs from a dormant Android node via ephemeral encrypted relay.
+The LazyVault CLI allows automated CI/CD runners (GitHub Actions, GitLab CI, Buildkite, Jenkins) to securely pull lazy-evaluated storage blobs from an Android phone node via encrypted zero-trust cloud relay.
 
 ## Core Security Features
 - **Zero-Trust**: The cloud never sees or stores plaintext file blobs.
@@ -10,26 +10,26 @@ The LazyVault CLI allows automated CI/CD runners (GitHub Actions, GitLab CI, Bui
 
 ## Usage
 
-### Python 3 Client (`lazyvault-get.py`)
+### Direct by Vault ID
 ```bash
-./lazyvault-get.py \
-  --backend-url http://localhost:4000 \
-  --path "/storage/emulated/0/LazyVault/model_weights.bin" \
-  --output ./model_weights.bin \
+python3 cli/lazyvault-get.py \
+  --vault-id "vlt_95bed4ef8c" \
+  --path "img.jpg" \
+  --output ./downloaded_asset.raw \
   --timeout 60
 ```
 
-Or query directly by SHA-256:
+### Direct by Shareable Web URL
 ```bash
-./lazyvault-get.py \
-  --backend-url http://localhost:4000 \
-  --file-hash "2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae" \
-  --output ./dataset.tar.gz
+python3 cli/lazyvault-get.py \
+  --backend-url "https://lazyvault.web.app/v/vlt_95bed4ef8c" \
+  --path "img.jpg" \
+  --output ./downloaded_asset.raw
 ```
 
 ### GitHub Actions Workflow Example
 ```yaml
-name: Pull Lazy Artifact
+name: Build and Bundle Secret Asset
 on: [push]
 
 jobs:
@@ -37,11 +37,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Fetch Artifact from LazyVault Node
+      - name: Fetch Asset from Mobile LazyVault Node
         run: |
-          python3 cli/lazyvault-get.py \
-            --backend-url "${{ secrets.LAZYVAULT_BACKEND_URL }}" \
-            --path "dataset.tar.gz" \
-            --context "GitHub Actions #${{ github.run_id }} by ${{ github.actor }}" \
-            --output ./data/dataset.tar.gz
+          python3 -m pip install cryptography --quiet
+          curl -fsSL https://raw.githubusercontent.com/Akshay-86/LazyVault/main/cli/lazyvault-get.py -o /tmp/lazyvault-get.py
+          
+          python3 /tmp/lazyvault-get.py \
+            --vault-id "${{ secrets.LAZYVAULT_ID }}" \
+            --path "img.jpg" \
+            --output /tmp/vault_asset.raw
 ```

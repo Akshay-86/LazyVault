@@ -201,6 +201,28 @@ export const App: React.FC = () => {
     fetchCatalog();
   }, [fetchCatalog]);
 
+  // 4. Auto-open file transfer modal if ?file= query parameter is present in URL
+  const [hasAutoOpenedFile, setHasAutoOpenedFile] = useState(false);
+  useEffect(() => {
+    if (!catalog?.files || hasAutoOpenedFile || isLocked) return;
+    const params = new URLSearchParams(window.location.search);
+    const targetFileParam = params.get('file');
+    if (!targetFileParam) return;
+
+    const matched = catalog.files.find(
+      (f) =>
+        f.name === targetFileParam ||
+        f.path === targetFileParam ||
+        f.sha256 === targetFileParam ||
+        f.name.toLowerCase() === targetFileParam.toLowerCase()
+    );
+
+    if (matched) {
+      setActiveTransferFile(matched);
+      setHasAutoOpenedFile(true);
+    }
+  }, [catalog, isLocked, hasAutoOpenedFile]);
+
   const handleConnectVault = (e: React.FormEvent) => {
     e.preventDefault();
     const input = inputVaultInput.trim();
@@ -370,6 +392,7 @@ export const App: React.FC = () => {
         {/* File Table */}
         <CatalogTable
           files={catalog?.files || []}
+          vaultId={vaultId}
           onRequestFile={(item) => setActiveTransferFile(item)}
         />
       </main>
