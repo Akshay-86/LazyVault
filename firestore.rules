@@ -6,7 +6,7 @@ service cloud.firestore {
       allow list: if false;
 
       // Allow direct document lookup by exact vaultId
-      allow get: if !('expiresAt' in resource.data) || resource.data.expiresAt == 0 || request.time.toMillis() <= resource.data.expiresAt;
+      allow get: if resource == null || !('expiresAt' in resource.data) || resource.data.expiresAt == 0 || request.time.toMillis() <= resource.data.expiresAt;
 
       // Allow device management
       allow write: if true;

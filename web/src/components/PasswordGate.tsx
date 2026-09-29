@@ -7,9 +7,10 @@ interface PasswordGateProps {
   vaultId: string;
   backendUrl: string;
   onUnlocked: () => void;
+  onBack?: () => void;
 }
 
-export const PasswordGate: React.FC<PasswordGateProps> = ({ vaultId, backendUrl, onUnlocked }) => {
+export const PasswordGate: React.FC<PasswordGateProps> = ({ vaultId, backendUrl, onUnlocked, onBack }) => {
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
@@ -136,6 +137,16 @@ export const PasswordGate: React.FC<PasswordGateProps> = ({ vaultId, backendUrl,
               </>
             )}
           </button>
+
+          {onBack && (
+            <button
+              type="button"
+              onClick={onBack}
+              className="w-full py-2 px-4 bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-slate-200 font-medium text-xs rounded-lg transition border border-slate-800 text-center"
+            >
+              Back to Connect
+            </button>
+          )}
         </form>
 
         <div className="text-center pt-2 border-t border-slate-800/60">

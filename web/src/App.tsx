@@ -5,9 +5,45 @@ import { CatalogTable } from './components/CatalogTable.js';
 import { TransferModal } from './components/TransferModal.js';
 import { ManualRequestForm } from './components/ManualRequestForm.js';
 import { PasswordGate } from './components/PasswordGate.js';
-import { Shield, Smartphone, ArrowRight, Zap, FolderLock } from 'lucide-react';
+import { Shield, Smartphone, ArrowRight, Zap, FolderLock, FolderX, Loader2, AlertCircle } from 'lucide-react';
 import { db } from './firebase.js';
-import { doc, onSnapshot, setDoc, updateDoc, deleteDoc } from 'firebase/firestore';
+import { doc, getDoc, onSnapshot, setDoc, updateDoc, deleteDoc } from 'firebase/firestore';
+
+function parseVaultIdFromLocation(): string | null {
+  const path = window.location.pathname;
+  if (path.startsWith('/v/')) {
+    const id = path.replace('/v/', '').split('/')[0];
+    if (id) return id;
+  }
+  const params = new URLSearchParams(window.location.search);
+  return params.get('v') || null;
+}
+
+function extractAndValidateVaultId(input: string): { vaultId: string | null; error: string | null } {
+  const trimmed = input.trim();
+  if (!trimmed) {
+    return { vaultId: null, error: 'Please enter a Vault ID or paste a share link.' };
+  }
+
+  let id = trimmed;
+  if (trimmed.includes('/v/')) {
+    id = trimmed.split('/v/')[1].split('/')[0].split('?')[0];
+  } else if (trimmed.includes('v=')) {
+    const match = trimmed.match(/[?&]v=([^&]+)/);
+    if (match) id = match[1];
+  }
+
+  // Allow standard Vault ID formats: 'vlt_<alphanumeric>' or generic min 6-char IDs
+  const isValidFormat = /^vlt_[a-zA-Z0-9_-]{4,32}$/.test(id) || /^[a-zA-Z0-9_-]{6,32}$/.test(id);
+  if (!isValidFormat) {
+    return {
+      vaultId: null,
+      error: 'Invalid Vault ID format. It should look like "vlt_51f0ba6084" or a full share link.',
+    };
+  }
+
+  return { vaultId: id, error: null };
+}
 
 function getClientDeviceName(): string {
   const ua = navigator.userAgent;
@@ -31,47 +67,47 @@ export const App: React.FC = () => {
   const [catalog, setCatalog] = useState<CatalogResponse | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [activeTransferFile, setActiveTransferFile] = useState<CatalogItem | null>(null);
-  const [vaultId, setVaultId] = useState<string | null>(() => {
-    const path = window.location.pathname;
-    if (path.startsWith('/v/')) {
-      const id = path.replace('/v/', '').split('/')[0];
-      if (id) return id;
-    }
-    const params = new URLSearchParams(window.location.search);
-    return params.get('v') || null;
-  });
-  const [isLocked, setIsLocked] = useState<boolean>(true);
+  const [vaultId, setVaultId] = useState<string | null>(() => parseVaultIdFromLocation());
+  const [isCheckingVault, setIsCheckingVault] = useState<boolean>(() => !!parseVaultIdFromLocation());
+  const [vaultNotFound, setVaultNotFound] = useState<boolean>(false);
+  const [isLocked, setIsLocked] = useState<boolean>(false);
   const [hasPassword, setHasPassword] = useState<boolean>(false);
   const [isExpired, setIsExpired] = useState<boolean>(false);
   const [expiresAt, setExpiresAt] = useState<number | null>(null);
   const [inputVaultInput, setInputVaultInput] = useState<string>('');
+  const [connectError, setConnectError] = useState<string | null>(null);
+  const [isConnecting, setIsConnecting] = useState<boolean>(false);
 
   const backendUrl = import.meta.env.VITE_BACKEND_URL || '';
 
   // 1. Parse Vault ID on location changes
   useEffect(() => {
-    const path = window.location.pathname;
-    if (path.startsWith('/v/')) {
-      const id = path.replace('/v/', '').split('/')[0];
-      if (id) setVaultId(id);
-    } else {
-      const params = new URLSearchParams(window.location.search);
-      const v = params.get('v');
-      if (v) setVaultId(v);
+    const id = parseVaultIdFromLocation();
+    if (id) {
+      setVaultId(id);
+      setIsCheckingVault(true);
+      setVaultNotFound(false);
     }
   }, []);
 
   // 2. Query Vault security & expiry info directly from Cloud Firestore
   useEffect(() => {
     if (!vaultId) {
+      setIsCheckingVault(false);
       setIsLocked(false);
+      setVaultNotFound(false);
       return;
     }
+
+    setIsCheckingVault(true);
+    setVaultNotFound(false);
+    setIsExpired(false);
 
     // Direct real-time listener from Cloud Firestore (100% Serverless!)
     const unsubscribe = onSnapshot(
       doc(db, 'vaults', vaultId),
       (docSnap) => {
+        setIsCheckingVault(false);
         if (docSnap.exists()) {
           const data = docSnap.data();
           const now = Date.now();
@@ -80,12 +116,16 @@ export const App: React.FC = () => {
           if (expAt && expAt > 0 && now > expAt) {
             setIsExpired(true);
             setIsLocked(false);
+            setVaultNotFound(false);
+            setIsLoading(false);
             return;
           }
 
           if (expAt) {
             setExpiresAt(expAt);
           }
+
+          setVaultNotFound(false);
 
           if (data.requiresPassword) {
             setHasPassword(true);
@@ -115,12 +155,22 @@ export const App: React.FC = () => {
             setIsLoading(false);
           }
         } else {
-          // Fallback to local REST backend if available
-          if (backendUrl) {
+          // Document does not exist in Firestore
+          if (!backendUrl) {
+            setVaultNotFound(true);
+            setIsLocked(false);
+            setIsLoading(false);
+          } else {
+            // Fallback to local REST backend if available
             fetch(`${backendUrl}/api/v1/vault/${vaultId}/security`)
               .then((res) => (res.ok ? res.json() : null))
               .then((data) => {
-                if (!data) return;
+                if (!data) {
+                  setVaultNotFound(true);
+                  setIsLocked(false);
+                  return;
+                }
+                setVaultNotFound(false);
                 if (data.requiresPassword) {
                   setHasPassword(true);
                   setIsLocked(true);
@@ -129,12 +179,20 @@ export const App: React.FC = () => {
                   setIsLocked(false);
                 }
               })
-              .catch(() => {});
+              .catch(() => {
+                setVaultNotFound(true);
+                setIsLocked(false);
+              })
+              .finally(() => setIsLoading(false));
           }
         }
       },
       (error) => {
-        console.warn('Firestore subscription error:', error);
+        console.warn('Firestore subscription error (vault missing or permission denied):', error);
+        setIsCheckingVault(false);
+        setIsLoading(false);
+        setVaultNotFound(true);
+        setIsLocked(false);
       }
     );
 
@@ -223,27 +281,121 @@ export const App: React.FC = () => {
     }
   }, [catalog, isLocked, hasAutoOpenedFile]);
 
-  const handleConnectVault = (e: React.FormEvent) => {
-    e.preventDefault();
-    const input = inputVaultInput.trim();
-    if (!input) return;
+  const handleResetToConnect = () => {
+    window.history.pushState({}, '', '/');
+    setVaultId(null);
+    setVaultNotFound(false);
+    setIsExpired(false);
+    setIsLocked(false);
+    setHasPassword(false);
+    setIsCheckingVault(false);
+    setInputVaultInput('');
+    setConnectError(null);
+    setCatalog(null);
+  };
 
-    let targetId = input;
-    if (input.includes('/v/')) {
-      targetId = input.split('/v/')[1].split('/')[0].split('?')[0];
-    } else if (input.includes('v=')) {
-      const match = input.match(/[?&]v=([^&]+)/);
-      if (match) targetId = match[1];
+  const handleConnectVault = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setConnectError(null);
+
+    const { vaultId: targetId, error } = extractAndValidateVaultId(inputVaultInput);
+    if (error || !targetId) {
+      setConnectError(error || 'Invalid Vault ID.');
+      return;
     }
 
-    if (targetId) {
+    setIsConnecting(true);
+    try {
+      // Pre-check if vault exists in Cloud Firestore before redirecting
+      const docSnap = await getDoc(doc(db, 'vaults', targetId)).catch((err) => {
+        console.warn('Firestore pre-check error:', err);
+        return null;
+      });
+
+      if (!docSnap || !docSnap.exists()) {
+        if (backendUrl) {
+          const res = await fetch(`${backendUrl}/api/v1/vault/${targetId}/security`).catch(() => null);
+          if (!res || !res.ok) {
+            setConnectError(`No active vault found with ID "${targetId}". Check the ID or ensure your LazyVault Android app is running.`);
+            setIsConnecting(false);
+            return;
+          }
+        } else {
+          setConnectError(`No active vault found with ID "${targetId}". Check the ID or ensure your LazyVault Android app is running.`);
+          setIsConnecting(false);
+          return;
+        }
+      } else {
+        const data = docSnap.data();
+        const now = Date.now();
+        if (data.expiresAt && data.expiresAt > 0 && now > data.expiresAt) {
+          setConnectError(`This vault link has expired. Request a new share link from the Android app.`);
+          setIsConnecting(false);
+          return;
+        }
+      }
+
       window.history.pushState({}, '', `/v/${targetId}`);
       setVaultId(targetId);
-      setIsLocked(true);
+      setVaultNotFound(false);
+      setIsCheckingVault(true);
+    } catch (err: any) {
+      setConnectError(`Unable to verify vault: ${err.message || 'Network error'}`);
+    } finally {
+      setIsConnecting(false);
     }
   };
 
-  // 4. Render Expired Screen
+  // 4. Render Loading State when verifying Vault
+  if (isCheckingVault && vaultId) {
+    return (
+      <div className="min-h-screen bg-[#0b0f17] flex items-center justify-center p-4">
+        <div className="w-full max-w-sm bg-[#111726] border border-slate-800 rounded-2xl p-7 text-center space-y-4 shadow-xl">
+          <div className="h-12 w-12 mx-auto rounded-xl bg-blue-600/10 border border-blue-500/20 flex items-center justify-center text-blue-400">
+            <Loader2 className="h-6 w-6 animate-spin text-blue-400" />
+          </div>
+          <h2 className="text-base font-semibold text-white">Connecting to Vault</h2>
+          <p className="text-xs text-slate-400 font-mono">
+            {vaultId}
+          </p>
+          <p className="text-xs text-slate-500">
+            Verifying device availability and catalog...
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  // 5. Render Vault Not Found Screen
+  if (vaultNotFound && vaultId) {
+    return (
+      <div className="min-h-screen bg-[#0b0f17] flex items-center justify-center p-4">
+        <div className="w-full max-w-sm bg-[#111726] border border-slate-800 rounded-2xl p-7 text-center space-y-5 shadow-xl">
+          <div className="h-12 w-12 mx-auto rounded-xl bg-red-500/10 border border-red-500/20 flex items-center justify-center text-red-400">
+            <FolderX className="h-6 w-6 text-red-400" />
+          </div>
+          <div className="space-y-1.5">
+            <h2 className="text-lg font-semibold text-white">Vault Not Found</h2>
+            <p className="text-xs text-slate-400 font-mono break-all">
+              {vaultId}
+            </p>
+            <p className="text-xs text-slate-400 leading-relaxed pt-1">
+              No active vault was found with this ID. It may have expired, been revoked, or the ID was mistyped.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={handleResetToConnect}
+            className="w-full py-2.5 px-4 bg-slate-800 hover:bg-slate-700 text-slate-200 font-medium rounded-lg text-xs transition border border-slate-700/80 shadow-sm"
+          >
+            Enter Another Vault ID
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // 6. Render Expired Screen
   if (isExpired) {
     return (
       <div className="min-h-screen bg-[#0b0f17] flex items-center justify-center p-4">
@@ -255,12 +407,19 @@ export const App: React.FC = () => {
           <p className="text-xs text-slate-400">
             This vault link has reached its expiration time. Request a new share link from the Android LazyVault app.
           </p>
+          <button
+            type="button"
+            onClick={handleResetToConnect}
+            className="w-full py-2.5 px-4 bg-slate-800 hover:bg-slate-700 text-slate-200 font-medium rounded-lg text-xs transition border border-slate-700/80 shadow-sm"
+          >
+            Connect to Another Vault
+          </button>
         </div>
       </div>
     );
   }
 
-  // 5. Render Connect Screen if no Vault ID
+  // 7. Render Connect Screen if no Vault ID
   if (!vaultId) {
     return (
       <div className="min-h-screen bg-[#0b0f17] flex items-center justify-center p-4">
@@ -284,18 +443,38 @@ export const App: React.FC = () => {
                 type="text"
                 placeholder="e.g. vlt_51f0ba6084"
                 value={inputVaultInput}
-                onChange={(e) => setInputVaultInput(e.target.value)}
+                onChange={(e) => {
+                  setInputVaultInput(e.target.value);
+                  if (connectError) setConnectError(null);
+                }}
                 className="w-full px-3.5 py-2.5 bg-slate-900 border border-slate-700/80 rounded-lg text-white font-mono text-sm placeholder-slate-500 focus:outline-none focus:border-blue-500 transition"
                 autoFocus
               />
             </div>
+
+            {connectError && (
+              <div className="p-3 rounded-lg bg-red-950/40 border border-red-800/60 text-xs text-red-300 flex items-start space-x-2">
+                <AlertCircle className="h-4 w-4 text-red-400 flex-shrink-0 mt-0.5" />
+                <span>{connectError}</span>
+              </div>
+            )}
+
             <button
               type="submit"
-              disabled={!inputVaultInput.trim()}
+              disabled={!inputVaultInput.trim() || isConnecting}
               className="w-full py-2.5 px-4 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed text-white font-medium rounded-lg text-xs transition shadow-sm flex items-center justify-center space-x-2"
             >
-              <span>Connect</span>
-              <ArrowRight className="h-4 w-4" />
+              {isConnecting ? (
+                <>
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  <span>Verifying Vault...</span>
+                </>
+              ) : (
+                <>
+                  <span>Connect</span>
+                  <ArrowRight className="h-4 w-4" />
+                </>
+              )}
             </button>
           </form>
 
@@ -308,7 +487,7 @@ export const App: React.FC = () => {
     );
   }
 
-  // 6. Render Password Gate if locked
+  // 8. Render Password Gate if locked
   if (isLocked && vaultId) {
     return (
       <PasswordGate
@@ -318,6 +497,7 @@ export const App: React.FC = () => {
           setIsLocked(false);
           fetchCatalog();
         }}
+        onBack={handleResetToConnect}
       />
     );
   }

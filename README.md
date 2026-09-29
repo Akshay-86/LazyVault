@@ -90,8 +90,8 @@ Traditional remote storage solutions require running an always-on server, keepin
 
 ### 🌐 High-Performance WebRTC Binary Pipeline & Global Discovery
 * **Chunked Streaming**: Files are sliced into 64KB binary frames and streamed over an SCTP `RTCDataChannel`.
-* **Flow Control & Backpressure**: Leverages `bufferedAmountLowThreshold` events to prevent memory bloating and buffer overflow when transmitting gigabyte-sized files.
-* **Multi-STUN Global Discovery**: Integrated with Google (`stun.l.google.com`), Cloudflare (`stun.cloudflare.com`), and Twilio (`global.stun.twilio.com`) STUN infrastructure for maximum peer-to-peer NAT traversal across international carrier networks.
+* **Cooperative Flow Control & Backpressure**: 1MB low-watermark threshold and cooperative 32-chunk pacing (`delay(1)` every 2MB) prevent UDP socket buffer saturation, ensuring WebRTC ICE consent keep-alives survive at speeds exceeding 130 MB/s.
+* **Multi-STUN Global Discovery**: Streamlined to Google (`stun.l.google.com:19302`) and Cloudflare (`stun.cloudflare.com:3478`) STUN infrastructure for maximum peer-to-peer NAT traversal without candidate flooding.
 * **Automated Client Integrity Verification**: Files are piped through browser `crypto.subtle.digest('SHA-256')` as they arrive, guaranteeing bit-perfect authenticity before initiating download.
 
 ### 🛡️ Large File Transfer & Safety Safeguards (1 GB+ Protection)
@@ -120,16 +120,18 @@ LazyVault/
 │   │       └── storage/           # SAF file manager, catalog cache, preferences
 ├── web/                           # Web Dashboard (React, TypeScript, Tailwind CSS, Vite)
 │   ├── src/
-│   │   ├── App.tsx                # Main catalog browser and status indicators
+│   │   ├── App.tsx                # Main catalog browser, validation & status screens
 │   │   ├── firebase.ts            # Cloud Firestore web initialization
 │   │   ├── webrtc.ts              # WebRTC DataChannel receiver and SHA-256 validator
-│   │   └── components/            # PasswordGate, TransferModal, Audit modals
-│   ├── firebase.json              # Firebase Hosting configuration
-│   └── firestore.rules            # Firestore security rules
-├── backend/                       # Optional: Local/Relay Node.js Broker (Express, WebSockets)
-├── cli/                           # Headless CI/CD Client (Python 3 zero-dependency script)
+│   │   └── components/            # PasswordGate, TransferModal, CatalogTable
+│   └── README.md                  # Web portal documentation
+├── cli/                           # Headless CI/CD Client (Python 3 Firestore relay script)
+│   ├── lazyvault-get.py           # Zero-trust serverless CLI client
+│   └── README.md                  # CLI documentation
+├── firebase.json                  # Firebase Multi-Site Hosting & Firestore configuration
+├── firestore.rules                # Cloud Firestore security & access rules
 ├── .gitignore                     # Monorepo git hygiene rules
-└── README.md                      # Comprehensive documentation
+└── README.md                      # Comprehensive project documentation
 ```
 
 ---
@@ -148,18 +150,29 @@ No local computer or server needed! Everything runs directly between your Androi
 
 #### 2. Configure Your Vault on Mobile
 1. Open **LazyVault**.
-2. Tap **"Select Folder"** to grant access to your storage directory (Photos, Documents, etc.) via the Android Storage Access Framework.
+2. Tap **"Choose Folder"** to grant access to your storage directory (Photos, Documents, etc.) via the Android Storage Access Framework.
 3. Set an optional **Passcode** and **Expiration Lifetime**.
-4. Tap **"Sync Catalog"** to publish the metadata tree and cryptographic hashes to Cloud Firestore.
-5. Tap **"Share Vault"** or scan the on-screen QR code.
+4. Tap **"Sync"** to publish the metadata tree and cryptographic hashes to Cloud Firestore.
+5. Tap **"Share Link"** or **"Show QR"** to share your vault.
 
 #### 3. Access Files from Any Browser
-1. Navigate to: **`https://lazyvault.web.app/v/<YOUR_VAULT_ID>`**
-2. Enter your passcode if prompted.
-3. Browse your phone's catalog and click **"Download"** on any file.
-4. An immediate heads-up notification will appear on your phone:  
-   👉 **Tap `[ALLOW]`**
-5. Watch the real-time P2P WebRTC progress bar fill up as the file streams directly to your browser!
+1. Navigate to: **`https://lazyvault.web.app`**
+   * Enter your Vault ID (e.g. `vlt_51f0ba6084`) or paste your shareable link.
+   * Direct deep-link: **`https://lazyvault.web.app/v/<YOUR_VAULT_ID>`**
+2. **Built-in Constraints & Security**:
+   * The web portal validates the Vault ID format and checks Firestore in real time.
+   * If an ID does not exist or has been revoked, a clear **"Vault Not Found"** screen is shown.
+   * If a vault has expired, a **"Vault Link Expired"** screen is displayed.
+   * If protected with a passcode, the secure **Password Gate** prompts for authorization (with a direct option to return to the connect screen).
+3. **1-Click Share & Direct File Links**:
+   * Click **"Copy Link"** on any file row to generate a direct share link:  
+     `https://lazyvault.web.app/v/<VAULT_ID>?file=<filename>`
+   * Clicking the Vault ID badge in the header copies the complete vault URL.
+4. **Stream & Download**:
+   * Click **"Download"** on any file.
+   * An immediate heads-up notification will appear on your phone:  
+     👉 **Tap `[ALLOW]`**
+   * Watch the real-time P2P WebRTC progress bar fill up as the file streams directly to your browser!
 
 ---
 
@@ -198,7 +211,7 @@ npm run dev
 ```bash
 cd web
 npm run build
-npx --package=firebase-tools firebase deploy --only hosting
+firebase deploy --only hosting
 ```
 
 ---
@@ -241,27 +254,48 @@ The workflow works automatically out of the box with zero secrets by falling bac
 | **Silent Data Leeching / Exfiltration** | The Android node strictly ignores transfer requests unless an explicit human `[ALLOW]` action is registered via the system heads-up notification prompt. |
 | **Man-in-the-Middle (MITM)** | WebRTC P2P DataChannels enforce mandatory DTLS-SRTP end-to-end encryption. In relay mode, files are encrypted on-device with AES-256-GCM using ephemeral keys. |
 | **Tampered / Corrupted Payloads** | Payloads are streamed into browser memory and checked against the original SHA-256 hash using the Web Crypto API (`crypto.subtle.digest`) before the browser saves the file. |
-| **Memory Exhaustion (OOM) & Relay Abuse** | Large files are never buffered into RAM. WebRTC P2P streams continuous 64KB frames with backpressure. If P2P fails, the cloud relay strictly enforces a **50 MB circuit breaker** (`MAX_RELAY_FILE_SIZE_BYTES`) to prevent mobile heap exhaustion and conserve Firestore write quotas. |
+| **Memory Exhaustion (OOM) & Relay Abuse** | Large files are never buffered into RAM. WebRTC P2P streams continuous 64KB frames with cooperative backpressure pacing. If P2P fails, the cloud relay strictly enforces a **50 MB circuit breaker** (`MAX_RELAY_FILE_SIZE_BYTES`) to prevent mobile heap exhaustion and conserve Firestore write quotas. |
 | **Cellular Data Allowance Drain** | Requests $\ge 100\text{ MB}$ trigger prominent `⚠️ Large File (X GB) — Wi-Fi Recommended` alerts in Android heads-up prompts and in-app cards before the user can tap `[ALLOW]`. |
 
 ---
 
 ## 8. Headless CI/CD Client (`cli/`)
 
-For headless automation pipelines (e.g., pulling a secure build artifact or database backup from your phone in a GitHub Actions runner):
+For automated CI/CD runners (GitHub Actions, GitLab CI, Buildkite, Jenkins) to pull files dynamically from your Android phone via serverless encrypted relay:
 
 ```bash
-# Request a file via CLI (Python 3, zero third-party dependencies):
+# Direct by Vault ID
 python3 cli/lazyvault-get.py \
-  --backend-url https://lazyvault.web.app \
-  --path "/storage/vault/database_backup.sqlite.enc" \
-  --output ./database_backup.sqlite.enc \
+  --vault-id "vlt_51f0ba6084" \
+  --path "model_weights.bin" \
+  --output ./model_weights.bin \
   --timeout 60
+
+# Or using the shareable web URL
+python3 cli/lazyvault-get.py \
+  --backend-url "https://lazyvault.web.app/v/vlt_51f0ba6084" \
+  --path "img.jpg" \
+  --output ./downloaded_image.jpg
 ```
-1. The script requests the file and waits with exponential backoff.
-2. Your phone pops an approval notification.
+
+### GitHub Actions Workflow Example
+```yaml
+      - name: Fetch Asset from LazyVault Node
+        run: |
+          python3 -m pip install cryptography --quiet
+          curl -fsSL https://raw.githubusercontent.com/Akshay-86/LazyVault/main/cli/lazyvault-get.py -o /tmp/lazyvault-get.py
+          
+          python3 /tmp/lazyvault-get.py \
+            --vault-id "${{ secrets.LAZYVAULT_ID }}" \
+            --path "img.jpg" \
+            --output /tmp/vault_asset.raw
+```
+
+1. The script dispatches a single-use lease request directly to Cloud Firestore.
+2. Your phone displays a heads-up approval notification: `[ALLOW]` / `[DENY]`.
 3. You tap **[ALLOW]**.
-4. The CLI downloads the stream, verifies SHA-256 integrity, and exits `0`.
+4. The phone encrypts the file on-device with AES-256-GCM and streams chunks through the zero-trust cloud relay.
+5. The CLI reassembles, decrypts, validates the SHA-256 checksum against the catalog, purges the relay chunks from Firestore, and exits `0`.
 
 ---
 
