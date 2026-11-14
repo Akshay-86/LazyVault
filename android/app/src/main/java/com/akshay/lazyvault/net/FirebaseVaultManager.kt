@@ -20,7 +20,20 @@ class FirebaseVaultManager(private val context: Context) {
     private val firestore = FirebaseFirestore.getInstance()
     private val prefs = VaultPreferences(context)
     companion object {
-        private val handledRequestIds = java.util.Collections.synchronizedSet(mutableSetOf<String>())
+        private val handledRequestIds = java.util.Collections.synchronizedSet(
+            object : java.util.LinkedHashSet<String>() {
+                override fun add(element: String): Boolean {
+                    if (size >= 300) {
+                        val iterator = iterator()
+                        if (iterator.hasNext()) {
+                            iterator.next()
+                            iterator.remove()
+                        }
+                    }
+                    return super.add(element)
+                }
+            }
+        )
     }
     private var requestListener: ListenerRegistration? = null
     private var clientsListener: ListenerRegistration? = null
@@ -102,15 +115,30 @@ class FirebaseVaultManager(private val context: Context) {
                 }
 
                 val now = System.currentTimeMillis()
+
+                // Immediately dismiss notification if request doc was removed from WAITING_FOR_APPROVAL
+                // (e.g. marked EXPIRED, CANCELLED, REJECTED, or APPROVED)
+                snapshots?.documentChanges?.forEach { change ->
+                    if (change.type == DocumentChange.Type.REMOVED) {
+                        val removedReqId = change.document.id
+                        Log.d(TAG, "Request $removedReqId was removed from WAITING_FOR_APPROVAL (dismissing notification)")
+                        VaultNotificationManager.dismissNotification(context, removedReqId)
+                        handledRequestIds.remove(removedReqId)
+                    }
+                }
+
                 snapshots?.documents?.forEach { doc ->
                     val reqId = doc.id
-                    val expiresAt = doc.getLong("expiresAt") ?: (now + 60000L)
-                    val createdAt = doc.getLong("createdAt") ?: (expiresAt - 60000L)
+                    val expiresAt = doc.getLong("expiresAt") ?: 0L
+                    val createdAt = doc.getLong("createdAt") ?: (if (expiresAt > 0L) expiresAt - 60000L else now)
+                    val effectiveExpiresAt = if (expiresAt > 0L) expiresAt else (createdAt + 60000L)
 
-                    // 1. Stale / Expired request filter: silently mark EXPIRED and ignore!
-                    if (now > expiresAt || (now - createdAt) > 60000L) {
-                        Log.d(TAG, "Silently ignoring stale/expired request $reqId (now=$now, expiresAt=$expiresAt)")
+                    // 1. Stale / Expired request filter: dismiss notification, mark EXPIRED and ignore!
+                    if (now >= effectiveExpiresAt) {
+                        Log.d(TAG, "Silently ignoring stale/expired request $reqId (now=$now, expiresAt=$effectiveExpiresAt)")
                         updateRequestStatus(reqId, "EXPIRED")
+                        VaultNotificationManager.dismissNotification(context, reqId)
+                        handledRequestIds.remove(reqId)
                         return@forEach
                     }
 
@@ -131,12 +159,22 @@ class FirebaseVaultManager(private val context: Context) {
                             requesterContext = requesterContext,
                             requesterIp = requesterIp,
                             supportedTransports = transports,
-                            expiresAt = expiresAt
+                            expiresAt = effectiveExpiresAt
                         )
                         VaultNotificationManager.showTransferRequestNotification(
                             context = context,
                             request = req
                         )
+
+                        // Schedule local timer to dismiss notification on device when expiration is reached
+                        val remainingMs = (effectiveExpiresAt - System.currentTimeMillis()).coerceAtLeast(0L)
+                        if (remainingMs > 0) {
+                            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                                Log.d(TAG, "Local auto-dismiss timer fired for request $reqId")
+                                VaultNotificationManager.dismissNotification(context, reqId)
+                                handledRequestIds.remove(reqId)
+                            }, remainingMs)
+                        }
 
                         onRequestReceived(req)
                     }
@@ -342,10 +380,15 @@ class FirebaseVaultManager(private val context: Context) {
                 onProgress(percent, "Uploading encrypted chunk ${i + 1}/$chunkCount...")
             }
 
+            // Extract 16-byte authentication tag from ciphertext
+            val tagBytes = if (ciphertext.size >= 16) ciphertext.copyOfRange(ciphertext.size - 16, ciphertext.size) else ByteArray(0)
+            val tagB64 = Base64.encodeToString(tagBytes, Base64.NO_WRAP)
+
             // Update request document with relay metadata
             val relayMeta = mapOf(
                 "encryptionKeyB64" to keyB64,
                 "ivB64" to ivB64,
+                "authTagB64" to tagB64,
                 "chunkCount" to chunkCount,
                 "sizeBytes" to totalBytes.toLong(),
                 "sha256" to targetSha256

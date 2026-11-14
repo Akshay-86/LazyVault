@@ -11,7 +11,7 @@ const handleUpload = async (req: Request, res: Response) => {
   const request = store.getRequest(requestId);
 
   if (!request) {
-    return res.status(404).json({ error: 'Request not found or expired' });
+    return res.status(404).json({ success: false, error: 'Request not found or expired' });
   }
 
   try {
@@ -20,14 +20,16 @@ const handleUpload = async (req: Request, res: Response) => {
     console.log(`[Relay] Stored encrypted blob for request ${requestId} (${bytesReceived} bytes)`);
 
     return res.status(200).json({
+      success: true,
       status: 'uploaded',
       request_id: requestId,
+      requestId,
       bytes_received: bytesReceived,
     });
   } catch (error: any) {
     console.error(`[Relay] Upload failed for request ${requestId}:`, error);
     store.updateRequestStatus(requestId, 'FAILED', { error: error.message });
-    return res.status(500).json({ error: 'Failed to stream ciphertext blob' });
+    return res.status(500).json({ success: false, error: 'Failed to stream ciphertext blob: ' + error.message });
   }
 };
 
@@ -48,6 +50,18 @@ const handleDownload = (req: Request, res: Response) => {
   res.setHeader('Content-Type', 'application/octet-stream');
   res.setHeader('Content-Length', result.size);
   res.setHeader('Content-Disposition', `attachment; filename="lazyvault-${requestId}.enc"`);
+
+  result.stream.on('error', (err) => {
+    console.error(`[Relay] Stream error during download for ${requestId}:`, err);
+    if (!res.headersSent) {
+      res.status(500).end();
+    }
+  });
+
+  res.on('error', (err) => {
+    console.warn(`[Relay] Response error during download for ${requestId}:`, err);
+    result.stream.destroy();
+  });
 
   result.stream.pipe(res);
 };
@@ -109,11 +123,12 @@ const handleComplete = (req: Request, res: Response) => {
 
   const request = store.getRequest(requestId);
   if (!request) {
-    return res.status(404).json({ error: 'Request not found' });
+    return res.status(404).json({ success: false, error: 'Request not found' });
   }
 
   if (!encryptionKey || !iv) {
     return res.status(400).json({
+      success: false,
       error: 'Missing required crypto fields: encryption_key_b64 / ephemeral_key and iv_b64 / iv',
     });
   }
@@ -144,11 +159,15 @@ const handleComplete = (req: Request, res: Response) => {
   console.log(`[Relay] Phone completed encrypted upload for ${requestId}. Ready for client.`);
 
   return res.status(200).json({
+    success: true,
     status: 'COMPLETED',
     request_id: requestId,
+    requestId,
     download_url: finalDownloadUrl,
+    downloadUrl: finalDownloadUrl,
     expires_at: relayMeta.expiresAt,
     relay_metadata: relayMeta,
+    relayMetadata: relayMeta,
   });
 };
 

@@ -15,11 +15,15 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicInteger
 
 class ForegroundDataTransferService : Service() {
     private val TAG = "ForegroundDataService"
     private val scope = CoroutineScope(Dispatchers.IO)
-    private var transferJob: Job? = null
+    private val activeJobs = ConcurrentHashMap<String, Job>()
+    private val activeTransfers = AtomicInteger(0)
+    private val lockSync = Any()
     private var wakeLock: PowerManager.WakeLock? = null
     private var wifiLock: WifiManager.WifiLock? = null
 
@@ -27,12 +31,12 @@ class ForegroundDataTransferService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent == null) {
-            stopSelf()
+            if (activeTransfers.get() == 0) stopSelf(startId)
             return START_NOT_STICKY
         }
 
         val requestId = intent.getStringExtra("request_id") ?: run {
-            stopSelf()
+            if (activeTransfers.get() == 0) stopSelf(startId)
             return START_NOT_STICKY
         }
         val path = intent.getStringExtra("path") ?: "unknown_file"
@@ -59,25 +63,29 @@ class ForegroundDataTransferService : Service() {
         }
 
         // Acquire WakeLock & WifiLock to keep CPU & network hardware alive through deep sleep / screen off
-        try {
-            val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
-            wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "LazyVault:TransferWakeLock").apply {
-                setReferenceCounted(false)
-                acquire(30 * 60 * 1000L) // 30 mins max safety limit
+        synchronized(lockSync) {
+            if (activeTransfers.getAndIncrement() == 0) {
+                try {
+                    val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
+                    wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "LazyVault:TransferWakeLock").apply {
+                        setReferenceCounted(false)
+                        acquire(30 * 60 * 1000L) // 30 mins max safety limit
+                    }
+                    val wifiManager = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+                    wifiLock = wifiManager?.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "LazyVault:TransferWifiLock")?.apply {
+                        setReferenceCounted(false)
+                        acquire()
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed acquiring WakeLock/WifiLock: ${e.message}")
+                }
             }
-            val wifiManager = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
-            wifiLock = wifiManager?.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "LazyVault:TransferWifiLock")?.apply {
-                setReferenceCounted(false)
-                acquire()
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "Failed acquiring WakeLock/WifiLock: ${e.message}")
         }
 
         val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         val transferEngine = TransferEngine(applicationContext)
 
-        transferJob = scope.launch {
+        val job = scope.launch {
             Log.d(TAG, "Starting Foreground Service transfer for $requestId")
             try {
                 var lastNotifyTime = 0L
@@ -105,24 +113,34 @@ class ForegroundDataTransferService : Service() {
 
                 Log.d(TAG, "Foreground transfer finished for $requestId. Success: $success")
             } finally {
-                try {
-                    if (wakeLock?.isHeld == true) wakeLock?.release()
-                    if (wifiLock?.isHeld == true) wifiLock?.release()
-                } catch (ignored: Exception) {}
-                stopForeground(STOP_FOREGROUND_REMOVE)
-                stopSelf()
+                activeJobs.remove(requestId)
+                val remaining = activeTransfers.decrementAndGet()
+                if (remaining <= 0) {
+                    synchronized(lockSync) {
+                        try {
+                            if (wakeLock?.isHeld == true) wakeLock?.release()
+                            if (wifiLock?.isHeld == true) wifiLock?.release()
+                        } catch (ignored: Exception) {}
+                    }
+                    stopForeground(STOP_FOREGROUND_REMOVE)
+                    stopSelf(startId)
+                }
             }
         }
+        activeJobs[requestId] = job
 
         return START_NOT_STICKY
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        transferJob?.cancel()
-        try {
-            if (wakeLock?.isHeld == true) wakeLock?.release()
-            if (wifiLock?.isHeld == true) wifiLock?.release()
-        } catch (ignored: Exception) {}
+        activeJobs.values.forEach { it.cancel() }
+        activeJobs.clear()
+        synchronized(lockSync) {
+            try {
+                if (wakeLock?.isHeld == true) wakeLock?.release()
+                if (wifiLock?.isHeld == true) wifiLock?.release()
+            } catch (ignored: Exception) {}
+        }
     }
 }

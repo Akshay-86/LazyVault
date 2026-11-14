@@ -1,9 +1,9 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
+import { copyToClipboard } from '../utils/clipboard.js';
 import {
   Shield,
   HardDrive,
   RefreshCw,
-  Smartphone,
   Lock,
   Clock,
   Copy,
@@ -29,7 +29,6 @@ export const Header: React.FC<HeaderProps> = ({
   deviceId,
   itemCount,
   totalSizeBytes,
-  rootHash,
   expiresAt,
   hasPassword,
   isLoading,
@@ -37,9 +36,19 @@ export const Header: React.FC<HeaderProps> = ({
   onLock,
 }) => {
   const [copiedVaultId, setCopiedVaultId] = useState(false);
+  const [, setTick] = useState(0);
+
+  // Re-calculate relative expiry time dynamically every 10 seconds
+  useEffect(() => {
+    if (!expiresAt) return;
+    const interval = setInterval(() => {
+      setTick((t) => t + 1);
+    }, 10000);
+    return () => clearInterval(interval);
+  }, [expiresAt]);
 
   const formatBytes = (bytes: number) => {
-    if (bytes === 0) return '0 B';
+    if (!bytes || bytes <= 0 || isNaN(bytes)) return '0 B';
     const k = 1024;
     const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
     const i = Math.floor(Math.log(bytes) / Math.log(k));
@@ -55,16 +64,22 @@ export const Header: React.FC<HeaderProps> = ({
       const days = Math.floor(hours / 24);
       return `${days}d left`;
     }
-    return `${hours}h ${mins}m left`;
+    if (hours > 0) {
+      return `${hours}h ${mins}m left`;
+    }
+    const secs = Math.max(0, Math.floor((diff % (1000 * 60)) / 1000));
+    return `${mins}m ${secs}s left`;
   };
 
-  const copyVaultId = () => {
+  const handleCopyVaultId = async () => {
     if (!vaultId) return;
     const origin = window.location.origin;
     const shareUrl = `${origin}/v/${vaultId}`;
-    navigator.clipboard.writeText(shareUrl);
-    setCopiedVaultId(true);
-    setTimeout(() => setCopiedVaultId(false), 2000);
+    const success = await copyToClipboard(shareUrl);
+    if (success) {
+      setCopiedVaultId(true);
+      setTimeout(() => setCopiedVaultId(false), 2000);
+    }
   };
 
   return (
@@ -93,7 +108,7 @@ export const Header: React.FC<HeaderProps> = ({
           {/* Vault ID */}
           {vaultId && (
             <button
-              onClick={copyVaultId}
+              onClick={handleCopyVaultId}
               title="Click to copy Vault Share Link"
               className="flex items-center space-x-1.5 px-2.5 py-1.5 rounded-lg bg-slate-900 border border-slate-800 hover:border-slate-700 text-xs transition group"
             >
@@ -116,8 +131,8 @@ export const Header: React.FC<HeaderProps> = ({
               <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
               <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
             </span>
-            <span className="text-slate-300 font-medium">
-              {deviceId ? deviceId.slice(0, 14) : 'Device Ready'}
+            <span className="text-slate-300 font-medium truncate max-w-[150px]">
+              {deviceId ? (deviceId.length > 18 ? `${deviceId.slice(0, 18)}...` : deviceId) : 'Device Ready'}
             </span>
           </div>
 

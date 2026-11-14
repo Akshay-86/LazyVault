@@ -1,21 +1,16 @@
-import React, { useEffect, useState, useRef } from 'react';
-import { CatalogItem, RequestStatus, FileRequestResponse } from '../types.js';
-import { WebRTCReceiver, TransferProgress } from '../webrtc.js';
+import React, { useEffect, useState, useRef, useCallback } from 'react';
+import { CatalogItem, RequestStatus, FileRequestResponse, TransferProgress } from '../types.js';
+import { WebRTCReceiver } from '../webrtc.js';
+import { computeSha256 } from '../utils/crypto.js';
 import {
   X,
   Smartphone,
   ShieldCheck,
-  ShieldAlert,
-  Loader2,
-  Clock,
-  ArrowRight,
-  Download,
-  CheckCircle2,
   AlertTriangle,
-  Radio,
+  CheckCircle2,
 } from 'lucide-react';
 import { db } from '../firebase.js';
-import { collection, addDoc, doc, onSnapshot, updateDoc, getDoc, deleteDoc } from 'firebase/firestore';
+import { collection, addDoc, doc, onSnapshot, updateDoc, getDoc, deleteDoc, Unsubscribe } from 'firebase/firestore';
 
 interface TransferModalProps {
   file: CatalogItem;
@@ -27,7 +22,6 @@ interface TransferModalProps {
 export const TransferModal: React.FC<TransferModalProps> = ({ file, backendUrl, vaultId, onClose }) => {
   const [requestId, setRequestId] = useState<string | null>(null);
   const [status, setStatus] = useState<RequestStatus>('WAITING_FOR_APPROVAL');
-  const [chosenTransport, setChosenTransport] = useState<'webrtc' | 'relay'>('webrtc');
   const [timeRemainingSec, setTimeRemainingSec] = useState<number>(60);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [transferProgress, setTransferProgress] = useState<TransferProgress | null>(null);
@@ -35,379 +29,40 @@ export const TransferModal: React.FC<TransferModalProps> = ({ file, backendUrl, 
   const [verifiedSha256, setVerifiedSha256] = useState<string | null>(null);
 
   const receiverRef = useRef<WebRTCReceiver | null>(null);
+  const expiresAtRef = useRef<number | null>(null);
+  const initialTtlRef = useRef<number>(60);
   const pollTimerRef = useRef<any>(null);
   const countdownIntervalRef = useRef<any>(null);
   const isDownloadingRef = useRef<boolean>(false);
+  const firestoreUnsubRef = useRef<Unsubscribe | null>(null);
 
-  // 1. Initiate Request on Mount
+  const handleClose = useCallback(() => {
+    if (status === 'WAITING_FOR_APPROVAL' && requestId && vaultId && db) {
+      updateDoc(doc(db, 'vaults', vaultId, 'requests', requestId), {
+        status: 'CANCELLED',
+        updatedAt: Date.now(),
+      }).catch(console.warn);
+    }
+    if (receiverRef.current) {
+      receiverRef.current.close();
+      receiverRef.current = null;
+    }
+    onClose();
+  }, [status, requestId, vaultId, onClose]);
+
+  // Keyboard accessibility: Escape to close
   useEffect(() => {
-    let isMounted = true;
-
-    async function initiateRequest() {
-      // 1. Try Cloud Firestore (Serverless)
-      if (vaultId) {
-        try {
-          const reqRef = await addDoc(collection(db, 'vaults', vaultId, 'requests'), {
-            path: file.path,
-            name: file.name || file.path.split('/').pop() || 'file',
-            sha256: file.sha256,
-            size: file.size,
-            status: 'WAITING_FOR_APPROVAL',
-            requesterContext: `Web Browser (${navigator.userAgent.split(' ')[0]})`,
-            requesterIp: 'Remote Client',
-            supportedTransports: ['webrtc', 'relay'],
-            createdAt: Date.now(),
-            expiresAt: Date.now() + 60000,
-          });
-
-          const generatedReqId = reqRef.id;
-          if (isMounted) {
-            setRequestId(generatedReqId);
-            setStatus('WAITING_FOR_APPROVAL');
-            setTimeRemainingSec(60);
-          }
-
-          // Initialize serverless WebRTC DataChannel receiver immediately
-          const receiver = new WebRTCReceiver({
-            requestId: generatedReqId,
-            backendUrl: '',
-            vaultId: vaultId,
-            expectedSha256: file.sha256,
-            filename: file.name || file.path.split('/').pop() || 'download',
-            totalSize: file.size,
-            onProgress: (p) => {
-              if (isMounted) {
-                setTransferProgress(p);
-                // Do NOT set status to TRANSFERRING while waiting for device approval!
-                setStatus((prev) => {
-                  if (prev === 'WAITING_FOR_APPROVAL') {
-                    return p.bytesReceived > 0 ? 'TRANSFERRING' : 'WAITING_FOR_APPROVAL';
-                  }
-                  if (['COMPLETED', 'REJECTED', 'EXPIRED', 'FAILED'].includes(prev)) {
-                    return prev;
-                  }
-                  return 'TRANSFERRING';
-                });
-              }
-            },
-            onComplete: (_blob, sha) => {
-              if (isMounted) {
-                setStatus('COMPLETED');
-                setIsIntegrityVerified(true);
-                setVerifiedSha256(sha);
-              }
-            },
-            onError: (err) => {
-              if (isMounted) {
-                console.warn('[TransferModal] WebRTC error, holding for relay fallback:', err.message);
-                const isLarge = file.size > 50 * 1024 * 1024;
-                setTransferProgress((prev) => ({
-                  bytesReceived: prev?.bytesReceived || 0,
-                  totalBytes: file.size,
-                  progressPercent: 25,
-                  speedMbps: 0,
-                  statusText: isLarge
-                    ? 'Direct P2P blocked by carrier NAT. File > 50 MB cannot use cloud relay (connect phone to Wi-Fi).'
-                    : 'Direct P2P blocked by carrier NAT. Waiting for encrypted relay fallback...',
-                }));
-              }
-            },
-          });
-          receiverRef.current = receiver;
-          await receiver.start();
-
-          // Real-time listener for mobile node decision!
-          const unsub = onSnapshot(doc(db, 'vaults', vaultId, 'requests', generatedReqId), (snap) => {
-            if (snap.exists() && isMounted) {
-              const data = snap.data();
-              if (data.status) {
-                if (data.status === 'APPROVED') {
-                  setStatus('TRANSFERRING');
-                  setTransferProgress((prev) => prev || {
-                    bytesReceived: 0,
-                    totalBytes: file.size,
-                    progressPercent: 5,
-                    speedMbps: 0,
-                    statusText: 'Transfer approved on phone! Establishing direct P2P stream...',
-                  });
-                } else if (data.status === 'REJECTED') {
-                  setStatus('REJECTED');
-                  setErrorMessage('Transfer was denied on the Android device.');
-                  receiver.close();
-                } else if (data.status === 'COMPLETED') {
-                  const relayMeta = data.relayMetadata || data.relay_metadata;
-                  if ((data.chosenTransport === 'relay' || relayMeta) && !isDownloadingRef.current) {
-                    executeRelayDownload(generatedReqId, relayMeta);
-                  } else if (!isDownloadingRef.current) {
-                    setStatus('COMPLETED');
-                    setIsIntegrityVerified(true);
-                    setVerifiedSha256(data.sha256 || file.sha256);
-                  }
-                } else if (data.status === 'EXPIRED') {
-                  setStatus('EXPIRED');
-                  setErrorMessage('Transfer request expired (60s limit reached before approval).');
-                  receiver.close();
-                } else if (data.status === 'FAILED') {
-                  setStatus('FAILED');
-                  setErrorMessage(data.error || 'Transfer failed on device.');
-                  receiver.close();
-                }
-              }
-            }
-          });
-
-          return () => {
-            unsub();
-            if (vaultId) {
-              getDoc(doc(db, 'vaults', vaultId, 'requests', generatedReqId)).then((snap) => {
-                if (snap.exists() && snap.data().status === 'WAITING_FOR_APPROVAL') {
-                  updateDoc(doc(db, 'vaults', vaultId, 'requests', generatedReqId), {
-                    status: 'CANCELLED',
-                    updatedAt: Date.now(),
-                  }).catch(console.warn);
-                }
-              }).catch(console.warn);
-            }
-          };
-        } catch (firestoreErr) {
-          console.warn('Firestore request failed, trying REST fallback:', firestoreErr);
-        }
-      }
-
-      // 2. Fallback to REST backend
-      try {
-        const res = await fetch(`${backendUrl}/api/v1/request-file`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            target_sha256: file.sha256,
-            path: file.path,
-            requester_context: `Web Browser (${navigator.userAgent.split(' ')[0]})`,
-            supported_transports: ['relay'],
-            vault_id: vaultId,
-          }),
-        });
-
-        if (!res.ok) {
-          const err = await res.json();
-          throw new Error(err.error || 'Failed to dispatch request');
-        }
-
-        const data = await res.json();
-        if (isMounted) {
-          setRequestId(data.request_id);
-          setStatus(data.status);
-          setTimeRemainingSec(data.ttl_seconds || 60);
-        }
-      } catch (err: any) {
-        if (isMounted) {
-          setErrorMessage(err.message);
-          setStatus('FAILED');
-        }
-      }
-    }
-
-    initiateRequest();
-
-    return () => {
-      isMounted = false;
-      if (pollTimerRef.current) clearTimeout(pollTimerRef.current);
-      if (countdownIntervalRef.current) clearInterval(countdownIntervalRef.current);
-      if (receiverRef.current) receiverRef.current.close();
-    };
-  }, [file, backendUrl]);
-
-  // 2. Countdown Timer
-  useEffect(() => {
-    if (status === 'WAITING_FOR_APPROVAL') {
-      countdownIntervalRef.current = setInterval(() => {
-        setTimeRemainingSec((prev) => {
-          if (prev <= 1) {
-            clearInterval(countdownIntervalRef.current!);
-            countdownIntervalRef.current = null;
-            setStatus('EXPIRED');
-            setErrorMessage('Transfer request timed out after 60 seconds.');
-            if (vaultId && requestId) {
-              updateDoc(doc(db, 'vaults', vaultId, 'requests', requestId), {
-                status: 'EXPIRED',
-                updatedAt: Date.now(),
-              }).catch(console.warn);
-            }
-            return 0;
-          }
-          return prev - 1;
-        });
-      }, 1000);
-    } else {
-      if (countdownIntervalRef.current) {
-        clearInterval(countdownIntervalRef.current);
-        countdownIntervalRef.current = null;
-      }
-    }
-
-    return () => {
-      if (countdownIntervalRef.current) {
-        clearInterval(countdownIntervalRef.current);
-        countdownIntervalRef.current = null;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        handleClose();
       }
     };
-  }, [status, vaultId, requestId]);
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [handleClose]);
 
-  // 3. Status Polling / SSE Handler (Legacy REST mode only)
-  useEffect(() => {
-    if (!requestId || vaultId || ['COMPLETED', 'REJECTED', 'EXPIRED', 'FAILED'].includes(status)) {
-      return;
-    }
-
-    let active = true;
-
-    // Use SSE for zero-latency updates
-    const sse = new EventSource(`${backendUrl}/api/v1/request-file/${requestId}/events`);
-
-    sse.onmessage = (event) => {
-      if (!active) return;
-      try {
-        const update: FileRequestResponse = JSON.parse(event.data);
-        if (update.chosen_transport) {
-          setChosenTransport(update.chosen_transport);
-        }
-
-        if (update.status === 'COMPLETED' && !isDownloadingRef.current) {
-          sse.close();
-          executeRelayDownload(requestId, update.relay_metadata);
-        } else if (update.status === 'APPROVED') {
-          setStatus('TRANSFERRING');
-          setTransferProgress({
-            bytesReceived: 0,
-            totalBytes: file.size,
-            progressPercent: 20,
-            speedMbps: 0,
-            statusText: 'Lease approved on phone! Encrypting and streaming payload...',
-          });
-        } else if (update.status === 'REJECTED') {
-          setStatus('REJECTED');
-          setErrorMessage('Transfer request was explicitly REJECTED on the Android device.');
-          sse.close();
-        } else if (update.status === 'EXPIRED') {
-          setStatus('EXPIRED');
-          setErrorMessage('Transfer request expired (60s TTL limit reached before approval).');
-          sse.close();
-        }
-      } catch (err) {
-        console.error('SSE parse error:', err);
-      }
-    };
-
-    sse.onerror = () => {
-      // If SSE disconnects, fall back to polling
-      sse.close();
-      const poll = async () => {
-        if (!active) return;
-        try {
-          const resp = await fetch(`${backendUrl}/api/v1/request-file/${requestId}`);
-          if (resp.ok) {
-            const data: FileRequestResponse = await resp.json();
-            if (data.status === 'COMPLETED' && !isDownloadingRef.current) {
-              executeRelayDownload(requestId, data.relay_metadata || (data as any).relayMetadata);
-              return;
-            } else if (data.status === 'APPROVED') {
-              setStatus('TRANSFERRING');
-            } else if (['REJECTED', 'EXPIRED', 'FAILED'].includes(data.status)) {
-              setStatus(data.status);
-              if (data.error) setErrorMessage(data.error);
-              return;
-            }
-          }
-        } catch {
-          // Ignore polling errors
-        }
-        if (active && !['COMPLETED', 'REJECTED', 'EXPIRED', 'FAILED'].includes(status)) {
-          pollTimerRef.current = setTimeout(poll, 400);
-        }
-      };
-      pollTimerRef.current = setTimeout(poll, 400);
-    };
-
-    return () => {
-      active = false;
-      sse.close();
-    };
-  }, [requestId, status, backendUrl]);
-
-// Pure JS SHA-256 implementation for non-secure HTTP LAN contexts where window.crypto.subtle is restricted
-function sha256Bytes(bytes: Uint8Array): string {
-  function rightRotate(value: number, amount: number) {
-    return (value >>> amount) | (value << (32 - amount));
-  }
-  const mathPow = Math.pow;
-  const maxWord = mathPow(2, 32);
-  let i = 0, j = 0;
-  let result = '';
-  const words: number[] = [];
-  const bitLength = bytes.length * 8;
-  let hash: number[] = [];
-  const k: number[] = [];
-  let primeCounter = 0;
-  const isComposite: Record<number, boolean> = {};
-  for (let candidate = 2; primeCounter < 64; candidate++) {
-    if (!isComposite[candidate]) {
-      for (i = 0; i < 313; i += candidate) {
-        isComposite[i] = true;
-      }
-      hash[primeCounter] = (mathPow(candidate, 0.5) * maxWord) | 0;
-      k[primeCounter++] = (mathPow(candidate, 1 / 3) * maxWord) | 0;
-    }
-  }
-  const totalLen = ((bytes.length + 8) >> 6) + 1;
-  const totalBytes = totalLen * 64;
-  const padded = new Uint8Array(totalBytes);
-  padded.set(bytes);
-  padded[bytes.length] = 0x80;
-  const view = new DataView(padded.buffer);
-  view.setUint32(totalBytes - 4, bitLength, false);
-  view.setUint32(totalBytes - 8, Math.floor(bitLength / maxWord), false);
-  for (i = 0; i < totalBytes; i += 4) {
-    words.push(view.getUint32(i, false));
-  }
-  for (j = 0; j < words.length;) {
-    const w = words.slice(j, (j += 16));
-    const oldHash = hash;
-    hash = hash.slice(0, 8);
-    for (i = 0; i < 64; i++) {
-      const w15 = w[i - 15], w2 = w[i - 2];
-      const a = hash[0], e = hash[4];
-      const temp1 =
-        hash[7] +
-        (rightRotate(e, 6) ^ rightRotate(e, 11) ^ rightRotate(e, 25)) +
-        ((e & hash[5]) ^ (~e & hash[6])) +
-        k[i] +
-        (w[i] =
-          i < 16
-            ? w[i]
-            : (w[i - 16] +
-                (rightRotate(w15, 7) ^ rightRotate(w15, 18) ^ (w15 >>> 3)) +
-                w[i - 7] +
-                (rightRotate(w2, 17) ^ rightRotate(w2, 19) ^ (w2 >>> 10))) |
-              0);
-      const temp2 =
-        (rightRotate(a, 2) ^ rightRotate(a, 13) ^ rightRotate(a, 22)) +
-        ((a & hash[1]) ^ (a & hash[2]) ^ (hash[1] & hash[2]));
-      hash = [(temp1 + temp2) | 0].concat(hash);
-      hash[4] = (hash[4] + temp1) | 0;
-    }
-    for (i = 0; i < 8; i++) {
-      hash[i] = (hash[i] + oldHash[i]) | 0;
-    }
-  }
-  for (i = 0; i < 8; i++) {
-    const hex = (hash[i] >>> 0).toString(16).padStart(8, '0');
-    result += hex;
-  }
-  return result;
-}
-
-  // 4. Zero-Trust Ephemeral Relay Download & Decryption (with Secure & Insecure context support)
-  const executeRelayDownload = async (reqId: string, meta?: any) => {
+  // Zero-Trust Ephemeral Relay Download & Decryption
+  const executeRelayDownload = useCallback(async (reqId: string, meta?: any) => {
     if (isDownloadingRef.current) return;
     isDownloadingRef.current = true;
 
@@ -417,12 +72,13 @@ function sha256Bytes(bytes: Uint8Array): string {
         bytesReceived: 0,
         totalBytes: file.size,
         progressPercent: 35,
+        speedMBps: 0,
         speedMbps: 0,
         statusText: 'Retrieving ephemeral AES-256-GCM lease metadata...',
       });
 
       let relayMeta = meta;
-      if (!relayMeta) {
+      if (!relayMeta && backendUrl) {
         const res = await fetch(`${backendUrl}/api/v1/request-file/${reqId}`);
         if (res.ok) {
           const data = await res.json();
@@ -443,6 +99,7 @@ function sha256Bytes(bytes: Uint8Array): string {
           bytesReceived: 0,
           totalBytes: file.size,
           progressPercent: 55,
+          speedMBps: 0,
           speedMbps: 0,
           statusText: 'Streaming encrypted ciphertext from zero-trust relay...',
         });
@@ -451,11 +108,12 @@ function sha256Bytes(bytes: Uint8Array): string {
         let lastErr: any = null;
 
         // 1. Download Serverless Encrypted Chunks from Firestore (Zero-Trust, Serverless)
-        if (relayMeta.chunkCount && vaultId) {
+        if (relayMeta.chunkCount && vaultId && db) {
           setTransferProgress({
             bytesReceived: 0,
             totalBytes: file.size,
             progressPercent: 50,
+            speedMBps: 0,
             speedMbps: 0,
             statusText: `Downloading ${relayMeta.chunkCount} encrypted chunks from cloud relay...`,
           });
@@ -469,14 +127,16 @@ function sha256Bytes(bytes: Uint8Array): string {
             let totalLen = 0;
             for (const cDoc of chunkDocs) {
               if (!cDoc.exists()) throw new Error(`Missing chunk document ${cDoc.id} in Firestore`);
-              const b64 = cDoc.data().data;
+              const b64 = cDoc.data()?.data;
+              if (!b64) throw new Error(`Empty chunk payload in document ${cDoc.id}`);
               const binaryStr = atob(b64);
-              const u8 = new Uint8Array(binaryStr.length);
-              for (let k = 0; k < binaryStr.length; k++) {
+              const len = binaryStr.length;
+              const u8 = new Uint8Array(len);
+              for (let k = 0; k < len; k++) {
                 u8[k] = binaryStr.charCodeAt(k);
               }
               byteArrays.push(u8);
-              totalLen += u8.length;
+              totalLen += len;
             }
             const combined = new Uint8Array(totalLen);
             let offset = 0;
@@ -499,11 +159,11 @@ function sha256Bytes(bytes: Uint8Array): string {
         }
 
         // 2. Fall back to REST relay endpoints if cipherBuffer not yet retrieved
-        if (!cipherBuffer) {
+        if (!cipherBuffer && backendUrl) {
           const endpoints = [
             relayMeta.downloadUrl,
-            backendUrl ? `${backendUrl}/api/v1/relay/download/${reqId}` : null,
-            backendUrl ? `${backendUrl}/api/v1/relay/${reqId}/download` : null,
+            `${backendUrl}/api/v1/relay/download/${reqId}`,
+            `${backendUrl}/api/v1/relay/${reqId}/download`,
           ].filter(Boolean) as string[];
 
           for (const ep of endpoints) {
@@ -527,6 +187,7 @@ function sha256Bytes(bytes: Uint8Array): string {
           bytesReceived: cipherBuffer.byteLength,
           totalBytes: file.size,
           progressPercent: 75,
+          speedMBps: 0,
           speedMbps: 0,
           statusText: 'Decrypting ciphertext with ephemeral single-use AES-256-GCM key...',
         });
@@ -556,11 +217,16 @@ function sha256Bytes(bytes: Uint8Array): string {
           throw new Error('AES-256-GCM tag verification or decryption failed: ' + decErr.message);
         }
       } else {
-        // Non-secure HTTP LAN IP context (e.g. http://192.168.10.15 where browser blocks subtle crypto)
+        // Non-secure HTTP LAN IP context where Web Crypto is blocked by browser security
+        if (!backendUrl) {
+          throw new Error('Relay decryption requires a secure context (HTTPS/localhost) or a configured backend relay.');
+        }
+
         setTransferProgress({
           bytesReceived: 0,
           totalBytes: file.size,
           progressPercent: 60,
+          speedMBps: 0,
           speedMbps: 0,
           statusText: 'Streaming payload via ephemeral single-use lease decryptor...',
         });
@@ -596,38 +262,33 @@ function sha256Bytes(bytes: Uint8Array): string {
         bytesReceived: plaintextBuffer.byteLength,
         totalBytes: file.size,
         progressPercent: 95,
+        speedMBps: 0,
         speedMbps: 0,
         statusText: 'Verifying cryptographic SHA-256 integrity...',
       });
 
-      // Verify SHA-256 checksum (using subtle if available, otherwise pure JS sha256Bytes)
-      let computedSha256 = '';
-      if (hasSubtleCrypto) {
-        const hashBuffer = await window.crypto.subtle.digest('SHA-256', plaintextBuffer);
-        computedSha256 = Array.from(new Uint8Array(hashBuffer))
-          .map((b) => b.toString(16).padStart(2, '0'))
-          .join('')
-          .toLowerCase();
-      } else {
-        computedSha256 = sha256Bytes(new Uint8Array(plaintextBuffer)).toLowerCase();
-      }
+      // Verify SHA-256 checksum
+      const computedSha256 = await computeSha256(plaintextBuffer);
 
       if (file.sha256 && computedSha256 !== file.sha256.toLowerCase()) {
         throw new Error(`SHA-256 mismatch! Expected ${file.sha256}, got ${computedSha256}`);
       }
 
       // Trigger browser download
+      const filename = file.name || file.path.split(/[/\\]/).pop() || 'download';
       const blob = new Blob([plaintextBuffer], { type: file.mimeType || 'application/octet-stream' });
       const dlUrl = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = dlUrl;
-      a.download = file.name;
+      a.download = filename;
       document.body.appendChild(a);
       a.click();
       setTimeout(() => {
-        document.body.removeChild(a);
-        URL.revokeObjectURL(dlUrl);
-      }, 1000);
+        try {
+          if (document.body.contains(a)) document.body.removeChild(a);
+          URL.revokeObjectURL(dlUrl);
+        } catch {}
+      }, 1500);
 
       setIsIntegrityVerified(true);
       setVerifiedSha256(computedSha256);
@@ -636,6 +297,7 @@ function sha256Bytes(bytes: Uint8Array): string {
         bytesReceived: plaintextBuffer.byteLength,
         totalBytes: file.size,
         progressPercent: 100,
+        speedMBps: 0,
         speedMbps: 0,
         statusText: 'Transfer and cryptographic verification complete!',
       });
@@ -645,28 +307,359 @@ function sha256Bytes(bytes: Uint8Array): string {
       setStatus('FAILED');
       isDownloadingRef.current = false;
     }
-  };
+  }, [backendUrl, file.mimeType, file.name, file.path, file.sha256, file.size, vaultId]);
+
+  // 1. Initiate Request on Mount
+  useEffect(() => {
+    let isMounted = true;
+
+    async function initiateRequest() {
+      // 1. Try Cloud Firestore (Serverless)
+      if (vaultId && db) {
+        try {
+          const targetExpiresAt = Date.now() + 60000;
+          expiresAtRef.current = targetExpiresAt;
+          initialTtlRef.current = 60;
+
+          const reqRef = await addDoc(collection(db, 'vaults', vaultId, 'requests'), {
+            path: file.path,
+            name: file.name || file.path.split(/[/\\]/).pop() || 'file',
+            sha256: file.sha256,
+            size: file.size,
+            status: 'WAITING_FOR_APPROVAL',
+            requesterContext: `Web Browser (${navigator.userAgent.split(' ')[0]})`,
+            requesterIp: 'Remote Client',
+            supportedTransports: ['webrtc', 'relay'],
+            createdAt: Date.now(),
+            expiresAt: targetExpiresAt,
+          });
+
+          const generatedReqId = reqRef.id;
+          if (!isMounted) return;
+
+          setRequestId(generatedReqId);
+          setStatus('WAITING_FOR_APPROVAL');
+          setTimeRemainingSec(Math.max(0, Math.ceil((targetExpiresAt - Date.now()) / 1000)));
+
+          // Initialize serverless WebRTC DataChannel receiver immediately
+          const receiver = new WebRTCReceiver({
+            requestId: generatedReqId,
+            backendUrl: '',
+            vaultId: vaultId,
+            expectedSha256: file.sha256,
+            filename: file.name || file.path.split(/[/\\]/).pop() || 'download',
+            totalSize: file.size,
+            onProgress: (p) => {
+              if (isMounted) {
+                setTransferProgress(p);
+                setStatus((prev) => {
+                  if (prev === 'WAITING_FOR_APPROVAL') {
+                    return p.bytesReceived > 0 ? 'TRANSFERRING' : 'WAITING_FOR_APPROVAL';
+                  }
+                  if (['COMPLETED', 'REJECTED', 'EXPIRED', 'CANCELLED', 'FAILED'].includes(prev)) {
+                    return prev;
+                  }
+                  return 'TRANSFERRING';
+                });
+              }
+            },
+            onComplete: (_blob, sha) => {
+              if (isMounted) {
+                setStatus('COMPLETED');
+                setIsIntegrityVerified(true);
+                setVerifiedSha256(sha);
+              }
+            },
+            onError: (err) => {
+              if (isMounted) {
+                console.warn('[TransferModal] WebRTC error, holding for relay fallback:', err.message);
+                const isLarge = file.size > 50 * 1024 * 1024;
+                setTransferProgress((prev) => ({
+                  bytesReceived: prev?.bytesReceived || 0,
+                  totalBytes: file.size,
+                  progressPercent: 25,
+                  speedMBps: 0,
+                  speedMbps: 0,
+                  statusText: isLarge
+                    ? 'Direct P2P blocked by carrier NAT. File > 50 MB cannot use cloud relay (connect phone to Wi-Fi).'
+                    : 'Direct P2P blocked by carrier NAT. Waiting for encrypted relay fallback...',
+                }));
+              }
+            },
+          });
+          receiverRef.current = receiver;
+          await receiver.start();
+
+          // Real-time listener for mobile node decision
+          const unsub = onSnapshot(doc(db, 'vaults', vaultId, 'requests', generatedReqId), (snap) => {
+            if (snap.exists() && isMounted) {
+              const data = snap.data();
+              if (data.expiresAt) {
+                expiresAtRef.current = data.expiresAt;
+              }
+              if (data.status) {
+                setStatus((currentStatus) => {
+                  if (['EXPIRED', 'CANCELLED', 'FAILED', 'COMPLETED'].includes(currentStatus)) {
+                    if (receiverRef.current) {
+                      receiverRef.current.close();
+                    }
+                    return currentStatus;
+                  }
+
+                  if (data.status === 'APPROVED') {
+                    if (expiresAtRef.current && Date.now() >= expiresAtRef.current) {
+                      setErrorMessage('Transfer request expired (60s limit reached before approval).');
+                      if (receiverRef.current) receiverRef.current.close();
+                      return 'EXPIRED';
+                    }
+
+                    setTransferProgress((prev) => prev || {
+                      bytesReceived: 0,
+                      totalBytes: file.size,
+                      progressPercent: 5,
+                      speedMBps: 0,
+                      speedMbps: 0,
+                      statusText: 'Transfer approved on phone! Establishing direct P2P stream...',
+                    });
+                    return 'TRANSFERRING';
+                  } else if (data.status === 'REJECTED') {
+                    setErrorMessage('Transfer was denied on the Android device.');
+                    if (receiverRef.current) receiverRef.current.close();
+                    return 'REJECTED';
+                  } else if (data.status === 'COMPLETED') {
+                    const relayMeta = data.relayMetadata || data.relay_metadata;
+                    if ((data.chosenTransport === 'relay' || relayMeta) && !isDownloadingRef.current) {
+                      executeRelayDownload(generatedReqId, relayMeta);
+                    } else if (!isDownloadingRef.current) {
+                      setIsIntegrityVerified(true);
+                      setVerifiedSha256(data.sha256 || file.sha256);
+                    }
+                    return 'COMPLETED';
+                  } else if (data.status === 'EXPIRED') {
+                    setErrorMessage('Transfer request expired (60s limit reached before approval).');
+                    if (receiverRef.current) receiverRef.current.close();
+                    return 'EXPIRED';
+                  } else if (data.status === 'FAILED') {
+                    setErrorMessage(data.error || 'Transfer failed on device.');
+                    if (receiverRef.current) receiverRef.current.close();
+                    return 'FAILED';
+                  }
+                  return currentStatus;
+                });
+              }
+            }
+          });
+          firestoreUnsubRef.current = unsub;
+          return;
+        } catch (firestoreErr) {
+          console.warn('Firestore request failed, trying REST fallback:', firestoreErr);
+        }
+      }
+
+      // 2. Fallback to REST backend
+      if (backendUrl) {
+        try {
+          const res = await fetch(`${backendUrl}/api/v1/request-file`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              target_sha256: file.sha256,
+              path: file.path,
+              requester_context: `Web Browser (${navigator.userAgent.split(' ')[0]})`,
+              supported_transports: ['relay'],
+              vault_id: vaultId,
+            }),
+          });
+
+          if (!res.ok) {
+            const err = await res.json().catch(() => ({}));
+            throw new Error(err.error || 'Failed to dispatch request');
+          }
+
+          const data = await res.json();
+          if (isMounted) {
+            const ttl = data.ttl_seconds || 60;
+            initialTtlRef.current = ttl;
+            expiresAtRef.current = Date.now() + ttl * 1000;
+            setRequestId(data.request_id);
+            setStatus(data.status);
+            setTimeRemainingSec(ttl);
+          }
+        } catch (err: any) {
+          if (isMounted) {
+            setErrorMessage(err.message);
+            setStatus('FAILED');
+          }
+        }
+      } else {
+        if (isMounted) {
+          setErrorMessage('Unable to dispatch request: neither Firestore nor backend URL configured.');
+          setStatus('FAILED');
+        }
+      }
+    }
+
+    initiateRequest();
+
+    return () => {
+      isMounted = false;
+      if (firestoreUnsubRef.current) {
+        firestoreUnsubRef.current();
+        firestoreUnsubRef.current = null;
+      }
+      if (pollTimerRef.current) {
+        clearTimeout(pollTimerRef.current);
+        pollTimerRef.current = null;
+      }
+      if (countdownIntervalRef.current) {
+        clearInterval(countdownIntervalRef.current);
+        countdownIntervalRef.current = null;
+      }
+      if (receiverRef.current) {
+        receiverRef.current.close();
+        receiverRef.current = null;
+      }
+    };
+  }, [file, backendUrl, vaultId, executeRelayDownload]);
+
+  // 2. Authoritative Countdown Timer Synced with expiresAt
+  useEffect(() => {
+    if (status !== 'WAITING_FOR_APPROVAL') {
+      if (countdownIntervalRef.current) {
+        clearInterval(countdownIntervalRef.current);
+        countdownIntervalRef.current = null;
+      }
+      return;
+    }
+
+    const checkExpiration = () => {
+      if (!expiresAtRef.current) return;
+      const now = Date.now();
+      const remaining = Math.max(0, Math.ceil((expiresAtRef.current - now) / 1000));
+      setTimeRemainingSec(remaining);
+
+      if (remaining <= 0) {
+        if (countdownIntervalRef.current) {
+          clearInterval(countdownIntervalRef.current);
+          countdownIntervalRef.current = null;
+        }
+        setStatus('EXPIRED');
+        setErrorMessage('Transfer request timed out after 60 seconds.');
+        if (receiverRef.current) {
+          receiverRef.current.close();
+          receiverRef.current = null;
+        }
+        if (vaultId && requestId && db) {
+          updateDoc(doc(db, 'vaults', vaultId, 'requests', requestId), {
+            status: 'EXPIRED',
+            updatedAt: Date.now(),
+          }).catch(console.warn);
+        }
+      }
+    };
+
+    checkExpiration();
+    countdownIntervalRef.current = setInterval(checkExpiration, 500);
+
+    return () => {
+      if (countdownIntervalRef.current) {
+        clearInterval(countdownIntervalRef.current);
+        countdownIntervalRef.current = null;
+      }
+    };
+  }, [status, vaultId, requestId]);
+
+  // 3. Status Polling / SSE Handler (REST mode only)
+  useEffect(() => {
+    if (!requestId || vaultId || !backendUrl || ['COMPLETED', 'REJECTED', 'EXPIRED', 'CANCELLED', 'FAILED'].includes(status)) {
+      return;
+    }
+
+    let active = true;
+    const sse = new EventSource(`${backendUrl}/api/v1/request-file/${requestId}/events`);
+
+    sse.onmessage = (event) => {
+      if (!active) return;
+      try {
+        const update: FileRequestResponse = JSON.parse(event.data);
+
+        if (update.status === 'COMPLETED' && !isDownloadingRef.current) {
+          sse.close();
+          executeRelayDownload(requestId, update.relay_metadata);
+        } else if (update.status === 'APPROVED') {
+          setStatus('TRANSFERRING');
+          setTransferProgress({
+            bytesReceived: 0,
+            totalBytes: file.size,
+            progressPercent: 20,
+            speedMBps: 0,
+            speedMbps: 0,
+            statusText: 'Lease approved on phone! Encrypting and streaming payload...',
+          });
+        } else if (update.status === 'REJECTED') {
+          setStatus('REJECTED');
+          setErrorMessage('Transfer request was explicitly REJECTED on the Android device.');
+          sse.close();
+        } else if (update.status === 'EXPIRED') {
+          setStatus('EXPIRED');
+          setErrorMessage('Transfer request expired (60s TTL limit reached before approval).');
+          sse.close();
+        }
+      } catch (err) {
+        console.error('SSE parse error:', err);
+      }
+    };
+
+    sse.onerror = () => {
+      sse.close();
+      const poll = async () => {
+        if (!active) return;
+        try {
+          const resp = await fetch(`${backendUrl}/api/v1/request-file/${requestId}`);
+          if (resp.ok) {
+            const data: FileRequestResponse = await resp.json();
+            if (data.status === 'COMPLETED' && !isDownloadingRef.current) {
+              executeRelayDownload(requestId, data.relay_metadata || (data as any).relayMetadata);
+              return;
+            } else if (data.status === 'APPROVED') {
+              setStatus('TRANSFERRING');
+            } else if (['REJECTED', 'EXPIRED', 'FAILED'].includes(data.status)) {
+              setStatus(data.status);
+              if (data.error) setErrorMessage(data.error);
+              return;
+            }
+          }
+        } catch {}
+        if (active && !['COMPLETED', 'REJECTED', 'EXPIRED', 'CANCELLED', 'FAILED'].includes(status)) {
+          pollTimerRef.current = setTimeout(poll, 500);
+        }
+      };
+      pollTimerRef.current = setTimeout(poll, 500);
+    };
+
+    return () => {
+      active = false;
+      sse.close();
+    };
+  }, [requestId, status, backendUrl, vaultId, file.size, executeRelayDownload]);
 
   const formatBytes = (bytes: number) => {
-    if (bytes === 0) return '0 B';
+    if (!bytes || bytes <= 0 || isNaN(bytes)) return '0 B';
     const k = 1024;
     const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
     const i = Math.floor(Math.log(bytes) / Math.log(k));
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
   };
 
-  const handleClose = () => {
-    if (status === 'WAITING_FOR_APPROVAL' && requestId && vaultId) {
-      updateDoc(doc(db, 'vaults', vaultId, 'requests', requestId), {
-        status: 'CANCELLED',
-        updatedAt: Date.now(),
-      }).catch(console.warn);
-    }
-    onClose();
-  };
+  const progressFraction = Math.max(0, Math.min(1, timeRemainingSec / (initialTtlRef.current || 60)));
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm animate-in fade-in duration-200">
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm animate-in fade-in duration-200"
+      onClick={(e) => {
+        if (e.target === e.currentTarget) handleClose();
+      }}
+    >
       <div className="w-full max-w-md bg-[#111726] border border-slate-800 rounded-2xl shadow-2xl overflow-hidden">
         {/* Modal Header */}
         <div className="px-5 py-3.5 border-b border-slate-800 flex items-center justify-between bg-[#0d131f]">
@@ -686,7 +679,7 @@ function sha256Bytes(bytes: Uint8Array): string {
             <div className="flex items-center justify-between">
               <span className="text-xs text-slate-400">Selected File</span>
               <span className="text-xs font-mono font-medium text-slate-300">
-                {formatBytes(file.size)}
+                {file.size > 0 ? formatBytes(file.size) : 'On-demand stream'}
               </span>
             </div>
             <div className="font-medium text-sm text-slate-100 truncate">{file.name}</div>
@@ -727,8 +720,8 @@ function sha256Bytes(bytes: Uint8Array): string {
                     strokeWidth="4"
                     fill="transparent"
                     strokeDasharray={213.6}
-                    strokeDashoffset={213.6 * (1 - timeRemainingSec / 60)}
-                    className="transition-all duration-1000 ease-linear"
+                    strokeDashoffset={213.6 * (1 - progressFraction)}
+                    className="transition-all duration-500 ease-linear"
                   />
                 </svg>
                 <div className="absolute inset-0 flex flex-col items-center justify-center">
@@ -780,9 +773,15 @@ function sha256Bytes(bytes: Uint8Array): string {
 
               {transferProgress && (
                 <div className="flex justify-between text-xs font-mono text-slate-400">
-                  <span>{transferProgress.speedMbps > 0 ? `${transferProgress.speedMbps.toFixed(1)} MB/s` : 'P2P Stream'}</span>
                   <span>
-                    {(transferProgress.bytesReceived / 1024 / 1024).toFixed(1)} / {(file.size / 1024 / 1024).toFixed(1)} MB
+                    {transferProgress.speedMBps > 0
+                      ? `${transferProgress.speedMBps.toFixed(1)} MB/s`
+                      : 'P2P Stream'}
+                  </span>
+                  <span>
+                    {formatBytes(transferProgress.bytesReceived)}
+                    {(transferProgress.totalBytes > 0 || file.size > 0) &&
+                      ` / ${formatBytes(transferProgress.totalBytes || file.size)}`}
                   </span>
                 </div>
               )}
@@ -816,8 +815,8 @@ function sha256Bytes(bytes: Uint8Array): string {
             </div>
           )}
 
-          {/* State 4: REJECTED / EXPIRED / FAILED */}
-          {(status === 'REJECTED' || status === 'EXPIRED' || status === 'FAILED') && (
+          {/* State 4: REJECTED / EXPIRED / CANCELLED / FAILED */}
+          {(status === 'REJECTED' || status === 'EXPIRED' || status === 'CANCELLED' || status === 'FAILED') && (
             <div className="text-center py-5 space-y-3">
               <div className="h-12 w-12 mx-auto rounded-full bg-red-950/60 border border-red-500/30 flex items-center justify-center text-red-400">
                 <AlertTriangle className="h-6 w-6" />
@@ -828,10 +827,17 @@ function sha256Bytes(bytes: Uint8Array): string {
                     ? 'Transfer Declined'
                     : status === 'EXPIRED'
                     ? 'Request Expired'
+                    : status === 'CANCELLED'
+                    ? 'Transfer Cancelled'
                     : 'Transfer Failed'}
                 </h3>
                 <p className="text-xs text-slate-400 max-w-xs mx-auto mt-1 leading-relaxed">
-                  {errorMessage || (status === 'REJECTED' ? 'The transfer request was declined on the mobile device.' : 'The transfer could not be completed.')}
+                  {errorMessage ||
+                    (status === 'REJECTED'
+                      ? 'The transfer request was declined on the mobile device.'
+                      : status === 'CANCELLED'
+                      ? 'The transfer request was cancelled.'
+                      : 'The transfer could not be completed.')}
                 </p>
               </div>
             </div>

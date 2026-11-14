@@ -170,7 +170,7 @@ class VaultStorageManager(private val context: Context) {
         // Fallback: internal storage vault if no SAF folder chosen or SAF empty/failed
         if (!scannedFromSAF || indexed.isEmpty()) {
             val vaultDir = File(context.filesDir, "vault")
-            if (!vaultDir.exists()) {
+            if (!vaultDir.exists() || vaultDir.listFiles().isNullOrEmpty()) {
                 vaultDir.mkdirs()
                 seedInitialVault(vaultDir)
             }
@@ -224,8 +224,14 @@ class VaultStorageManager(private val context: Context) {
     private fun traverseDocumentTree(
         dir: DocumentFile,
         currentPath: String,
-        outList: MutableList<ScannedDocItem>
+        outList: MutableList<ScannedDocItem>,
+        depth: Int = 0
     ) {
+        if (depth > 15) {
+            Log.w(TAG, "Max directory depth (15) reached during SAF scan at $currentPath")
+            return
+        }
+
         val files = try {
             dir.listFiles()
         } catch (e: Exception) {
@@ -238,7 +244,7 @@ class VaultStorageManager(private val context: Context) {
 
             if (f.isDirectory) {
                 val nextSub = if (currentPath.isEmpty()) name else "$currentPath/$name"
-                traverseDocumentTree(f, nextSub, outList)
+                traverseDocumentTree(f, nextSub, outList, depth + 1)
             } else if (f.isFile) {
                 val relPath = if (currentPath.isEmpty()) name else "$currentPath/$name"
                 val length = f.length()
@@ -314,12 +320,25 @@ class VaultStorageManager(private val context: Context) {
         // 2. Fallback to local filesDir/vault
         val vaultDir = File(context.filesDir, "vault")
         val simpleName = path.substringAfterLast('/')
+        val relPath = path.removePrefix("/storage/vault/").removePrefix("/")
         val localFile = File(vaultDir, simpleName)
         if (localFile.exists()) {
             return FileInputStream(localFile)
         }
+        val subFile = File(vaultDir, relPath)
+        if (subFile.exists()) {
+            return FileInputStream(subFile)
+        }
 
-        // Create ephemeral fallback payload if file cannot be found
+        // Try recursive search in vaultDir if file not found at top level
+        try {
+            vaultDir.walkTopDown().forEach { f ->
+                if (f.isFile && (f.name == simpleName || f.name == relPath)) {
+                    return FileInputStream(f)
+                }
+            }
+        } catch (ignored: Exception) {}
+
         return null
     }
 
@@ -356,8 +375,22 @@ class VaultStorageManager(private val context: Context) {
             }
         }
 
-        val localFile = File(File(context.filesDir, "vault"), path.substringAfterLast('/'))
+        val vaultDir = File(context.filesDir, "vault")
+        val simpleName = path.substringAfterLast('/')
+        val relPath = path.removePrefix("/storage/vault/").removePrefix("/")
+        val localFile = File(vaultDir, simpleName)
         if (localFile.exists()) return localFile.length()
+
+        val subFile = File(vaultDir, relPath)
+        if (subFile.exists()) return subFile.length()
+
+        try {
+            vaultDir.walkTopDown().forEach { f ->
+                if (f.isFile && (f.name == simpleName || f.name == relPath)) {
+                    return f.length()
+                }
+            }
+        } catch (ignored: Exception) {}
 
         return 0L
     }

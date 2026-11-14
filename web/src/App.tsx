@@ -5,6 +5,7 @@ import { CatalogTable } from './components/CatalogTable.js';
 import { TransferModal } from './components/TransferModal.js';
 import { ManualRequestForm } from './components/ManualRequestForm.js';
 import { PasswordGate } from './components/PasswordGate.js';
+import { ErrorBoundary } from './components/ErrorBoundary.js';
 import { Shield, Smartphone, ArrowRight, Zap, FolderLock, FolderX, Loader2, AlertCircle } from 'lucide-react';
 import { db } from './firebase.js';
 import { doc, getDoc, onSnapshot, setDoc, updateDoc, deleteDoc } from 'firebase/firestore';
@@ -77,17 +78,27 @@ export const App: React.FC = () => {
   const [inputVaultInput, setInputVaultInput] = useState<string>('');
   const [connectError, setConnectError] = useState<string | null>(null);
   const [isConnecting, setIsConnecting] = useState<boolean>(false);
+  const [hasAutoOpenedFile, setHasAutoOpenedFile] = useState(false);
 
   const backendUrl = import.meta.env.VITE_BACKEND_URL || '';
 
-  // 1. Parse Vault ID on location changes
+  // 1. Sync Vault ID on location changes and browser back/forward buttons
   useEffect(() => {
-    const id = parseVaultIdFromLocation();
-    if (id) {
+    const handleLocationChange = () => {
+      const id = parseVaultIdFromLocation();
       setVaultId(id);
-      setIsCheckingVault(true);
+      setIsCheckingVault(!!id);
       setVaultNotFound(false);
-    }
+      setIsExpired(false);
+      if (!id) {
+        setCatalog(null);
+        setIsLocked(false);
+        setHasPassword(false);
+      }
+    };
+
+    window.addEventListener('popstate', handleLocationChange);
+    return () => window.removeEventListener('popstate', handleLocationChange);
   }, []);
 
   // 2. Query Vault security & expiry info directly from Cloud Firestore
@@ -96,6 +107,7 @@ export const App: React.FC = () => {
       setIsCheckingVault(false);
       setIsLocked(false);
       setVaultNotFound(false);
+      setIsLoading(false);
       return;
     }
 
@@ -103,7 +115,7 @@ export const App: React.FC = () => {
     setVaultNotFound(false);
     setIsExpired(false);
 
-    // Direct real-time listener from Cloud Firestore (100% Serverless!)
+    // Direct real-time listener from Cloud Firestore
     const unsubscribe = onSnapshot(
       doc(db, 'vaults', vaultId),
       (docSnap) => {
@@ -129,7 +141,9 @@ export const App: React.FC = () => {
 
           if (data.requiresPassword) {
             setHasPassword(true);
-            setIsLocked(true);
+            // Check if already unlocked in this session to prevent re-lock on doc updates
+            const isSessionUnlocked = sessionStorage.getItem(`vault_auth_${vaultId}`) === 'unlocked';
+            setIsLocked(!isSessionUnlocked);
           } else {
             setHasPassword(false);
             setIsLocked(false);
@@ -137,11 +151,12 @@ export const App: React.FC = () => {
 
           if (data.files && Array.isArray(data.files)) {
             const fileList: CatalogItem[] = data.files.map((f: any) => ({
-              path: f.path,
-              name: f.name || f.path.split('/').pop() || 'file',
-              size: f.size,
-              sha256: f.sha256,
-              mtime: f.mtime,
+              path: f.path || '',
+              name: f.name || (f.path ? f.path.split(/[/\\]/).pop() : 'file'),
+              size: f.size || 0,
+              sha256: f.sha256 || '',
+              mtime: f.mtime || Date.now(),
+              mimeType: f.mimeType,
             }));
             setCatalog({
               status: 'success',
@@ -173,7 +188,8 @@ export const App: React.FC = () => {
                 setVaultNotFound(false);
                 if (data.requiresPassword) {
                   setHasPassword(true);
-                  setIsLocked(true);
+                  const isSessionUnlocked = sessionStorage.getItem(`vault_auth_${vaultId}`) === 'unlocked';
+                  setIsLocked(!isSessionUnlocked);
                 } else {
                   setHasPassword(false);
                   setIsLocked(false);
@@ -199,9 +215,25 @@ export const App: React.FC = () => {
     return () => unsubscribe();
   }, [vaultId, backendUrl]);
 
-  // 3. Register client presence in Cloud Firestore for real-time Connected Devices
+  // 3. Active Expiration Monitor
   useEffect(() => {
-    if (!vaultId) return;
+    if (!expiresAt || expiresAt <= 0) return;
+
+    const checkExpiration = () => {
+      if (Date.now() >= expiresAt) {
+        setIsExpired(true);
+        setIsLoading(false);
+      }
+    };
+
+    checkExpiration();
+    const timer = setInterval(checkExpiration, 2000);
+    return () => clearInterval(timer);
+  }, [expiresAt]);
+
+  // 4. Register client presence in Cloud Firestore for real-time Connected Devices
+  useEffect(() => {
+    if (!vaultId || vaultNotFound || isExpired) return;
 
     const clientId = 'client_' + Math.random().toString(36).slice(2, 9);
     const clientRef = doc(db, 'vaults', vaultId, 'clients', clientId);
@@ -225,23 +257,47 @@ export const App: React.FC = () => {
       deleteDoc(clientRef).catch(() => {});
     };
     window.addEventListener('beforeunload', handleUnload);
+    window.addEventListener('pagehide', handleUnload);
 
     return () => {
       clearInterval(heartbeatTimer);
       window.removeEventListener('beforeunload', handleUnload);
+      window.removeEventListener('pagehide', handleUnload);
       deleteDoc(clientRef).catch(() => {});
     };
-  }, [vaultId]);
+  }, [vaultId, vaultNotFound, isExpired]);
 
-  // 3. Fetch Catalog Function
+  // 5. Fetch / Refresh Catalog Function
   const fetchCatalog = useCallback(async () => {
     setIsLoading(true);
     try {
-      if (vaultId) {
-        // Handled reactively by Firestore above
-        setIsLoading(false);
+      if (vaultId && db) {
+        const docSnap = await getDoc(doc(db, 'vaults', vaultId));
+        if (docSnap.exists()) {
+          const data = docSnap.data();
+          if (data.files && Array.isArray(data.files)) {
+            const fileList: CatalogItem[] = data.files.map((f: any) => ({
+              path: f.path || '',
+              name: f.name || (f.path ? f.path.split(/[/\\]/).pop() : 'file'),
+              size: f.size || 0,
+              sha256: f.sha256 || '',
+              mtime: f.mtime || Date.now(),
+              mimeType: f.mimeType,
+            }));
+            setCatalog({
+              status: 'success',
+              root_hash: data.merkleRoot || '',
+              updated_at: data.updatedAt || Date.now(),
+              total_size_bytes: fileList.reduce((acc, f) => acc + (f.size || 0), 0),
+              item_count: fileList.length,
+              device_id: data.deviceId || 'Android Storage Node',
+              files: fileList,
+            });
+          }
+        }
         return;
       }
+
       if (backendUrl) {
         const res = await fetch(`${backendUrl}/api/v1/catalog`);
         if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
@@ -256,11 +312,12 @@ export const App: React.FC = () => {
   }, [vaultId, backendUrl]);
 
   useEffect(() => {
-    fetchCatalog();
-  }, [fetchCatalog]);
+    if (!vaultId && backendUrl) {
+      fetchCatalog();
+    }
+  }, [fetchCatalog, vaultId, backendUrl]);
 
-  // 4. Auto-open file transfer modal if ?file= query parameter is present in URL
-  const [hasAutoOpenedFile, setHasAutoOpenedFile] = useState(false);
+  // 6. Auto-open file transfer modal if ?file= query parameter is present in URL
   useEffect(() => {
     if (!catalog?.files || hasAutoOpenedFile || isLocked) return;
     const params = new URLSearchParams(window.location.search);
@@ -283,6 +340,9 @@ export const App: React.FC = () => {
 
   const handleResetToConnect = () => {
     window.history.pushState({}, '', '/');
+    if (vaultId) {
+      sessionStorage.removeItem(`vault_auth_${vaultId}`);
+    }
     setVaultId(null);
     setVaultNotFound(false);
     setIsExpired(false);
@@ -292,6 +352,7 @@ export const App: React.FC = () => {
     setInputVaultInput('');
     setConnectError(null);
     setCatalog(null);
+    setHasAutoOpenedFile(false);
   };
 
   const handleConnectVault = async (e: React.FormEvent) => {
@@ -346,7 +407,7 @@ export const App: React.FC = () => {
     }
   };
 
-  // 4. Render Loading State when verifying Vault
+  // Render Loading State when verifying Vault
   if (isCheckingVault && vaultId) {
     return (
       <div className="min-h-screen bg-[#0b0f17] flex items-center justify-center p-4">
@@ -366,7 +427,7 @@ export const App: React.FC = () => {
     );
   }
 
-  // 5. Render Vault Not Found Screen
+  // Render Vault Not Found Screen
   if (vaultNotFound && vaultId) {
     return (
       <div className="min-h-screen bg-[#0b0f17] flex items-center justify-center p-4">
@@ -395,7 +456,7 @@ export const App: React.FC = () => {
     );
   }
 
-  // 6. Render Expired Screen
+  // Render Expired Screen
   if (isExpired) {
     return (
       <div className="min-h-screen bg-[#0b0f17] flex items-center justify-center p-4">
@@ -419,7 +480,7 @@ export const App: React.FC = () => {
     );
   }
 
-  // 7. Render Connect Screen if no Vault ID
+  // Render Connect Screen if no Vault ID
   if (!vaultId) {
     return (
       <div className="min-h-screen bg-[#0b0f17] flex items-center justify-center p-4">
@@ -487,13 +548,14 @@ export const App: React.FC = () => {
     );
   }
 
-  // 8. Render Password Gate if locked
+  // Render Password Gate if locked
   if (isLocked && vaultId) {
     return (
       <PasswordGate
         vaultId={vaultId}
         backendUrl={backendUrl}
         onUnlocked={() => {
+          sessionStorage.setItem(`vault_auth_${vaultId}`, 'unlocked');
           setIsLocked(false);
           fetchCatalog();
         }}
@@ -503,94 +565,101 @@ export const App: React.FC = () => {
   }
 
   return (
-    <div className="min-h-screen bg-[#0b0f17] flex flex-col font-sans">
-      {/* Top Navigation & Status */}
-      <Header
-        vaultId={vaultId}
-        deviceId={catalog?.device_id}
-        itemCount={catalog?.item_count || 0}
-        totalSizeBytes={catalog?.total_size_bytes || 0}
-        rootHash={catalog?.root_hash}
-        lastUpdated={catalog?.updated_at}
-        expiresAt={expiresAt}
-        hasPassword={hasPassword}
-        isLoading={isLoading}
-        onRefresh={fetchCatalog}
-        onLock={() => setIsLocked(true)}
-      />
-
-      {/* Main Content Area */}
-      <main className="flex-1 max-w-7xl w-full mx-auto p-6 space-y-6">
-        {/* Architecture Infobar */}
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-3.5">
-          <div className="bg-[#111726] border border-slate-800 rounded-xl p-4 flex items-start space-x-3 shadow-sm">
-            <div className="p-2 rounded-lg bg-slate-900 border border-slate-800 text-blue-400">
-              <Zap className="h-4 w-4" />
-            </div>
-            <div>
-              <h3 className="text-xs font-semibold text-slate-200">Direct Peer-to-Peer</h3>
-              <p className="text-xs text-slate-400 mt-0.5 leading-relaxed">
-                Files stream directly between your device and browser via encrypted WebRTC.
-              </p>
-            </div>
-          </div>
-
-          <div className="bg-[#111726] border border-slate-800 rounded-xl p-4 flex items-start space-x-3 shadow-sm">
-            <div className="p-2 rounded-lg bg-slate-900 border border-slate-800 text-emerald-400">
-              <Shield className="h-4 w-4" />
-            </div>
-            <div>
-              <h3 className="text-xs font-semibold text-slate-200">Zero Cloud Storage</h3>
-              <p className="text-xs text-slate-400 mt-0.5 leading-relaxed">
-                Only file names and hashes are indexed. No files ever sit on cloud servers.
-              </p>
-            </div>
-          </div>
-
-          <div className="bg-[#111726] border border-slate-800 rounded-xl p-4 flex items-start space-x-3 shadow-sm">
-            <div className="p-2 rounded-lg bg-slate-900 border border-slate-800 text-slate-300">
-              <Smartphone className="h-4 w-4" />
-            </div>
-            <div>
-              <h3 className="text-xs font-semibold text-slate-200">On-Demand Approval</h3>
-              <p className="text-xs text-slate-400 mt-0.5 leading-relaxed">
-                Your phone sleeps until you request a file and tap Allow on the notification.
-              </p>
-            </div>
-          </div>
-        </div>
-
-        {/* Action Controls & Catalog Heading */}
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-1">
-          <div>
-            <h2 className="text-base font-semibold text-white tracking-tight">Available Files</h2>
-            <p className="text-xs text-slate-400">Select any file to stream directly to your downloads</p>
-          </div>
-          <ManualRequestForm onSubmit={(item) => setActiveTransferFile(item)} />
-        </div>
-
-        {/* File Table */}
-        <CatalogTable
-          files={catalog?.files || []}
+    <ErrorBoundary>
+      <div className="min-h-screen bg-[#0b0f17] flex flex-col font-sans">
+        {/* Top Navigation & Status */}
+        <Header
           vaultId={vaultId}
-          onRequestFile={(item) => setActiveTransferFile(item)}
+          deviceId={catalog?.device_id}
+          itemCount={catalog?.item_count || 0}
+          totalSizeBytes={catalog?.total_size_bytes || 0}
+          rootHash={catalog?.root_hash}
+          lastUpdated={catalog?.updated_at}
+          expiresAt={expiresAt}
+          hasPassword={hasPassword}
+          isLoading={isLoading}
+          onRefresh={fetchCatalog}
+          onLock={() => {
+            if (vaultId) {
+              sessionStorage.removeItem(`vault_auth_${vaultId}`);
+            }
+            setIsLocked(true);
+          }}
         />
-      </main>
 
-      {/* Transfer Modal */}
-      {activeTransferFile && (
-        <TransferModal
-          file={activeTransferFile}
-          backendUrl={backendUrl}
-          vaultId={vaultId}
-          onClose={() => setActiveTransferFile(null)}
-        />
-      )}
+        {/* Main Content Area */}
+        <main className="flex-1 max-w-7xl w-full mx-auto p-6 space-y-6">
+          {/* Architecture Infobar */}
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3.5">
+            <div className="bg-[#111726] border border-slate-800 rounded-xl p-4 flex items-start space-x-3 shadow-sm">
+              <div className="p-2 rounded-lg bg-slate-900 border border-slate-800 text-blue-400">
+                <Zap className="h-4 w-4" />
+              </div>
+              <div>
+                <h3 className="text-xs font-semibold text-slate-200">Direct Peer-to-Peer</h3>
+                <p className="text-xs text-slate-400 mt-0.5 leading-relaxed">
+                  Files stream directly between your device and browser via encrypted WebRTC.
+                </p>
+              </div>
+            </div>
 
-      {/* Footer */}
-      <footer className="border-t border-slate-800/80 py-4 px-6 text-center text-xs text-slate-500 bg-[#0d131f]">
-        LazyVault • Private Peer-to-Peer File Transfer Protocol
-      </footer>
-    </div>
+            <div className="bg-[#111726] border border-slate-800 rounded-xl p-4 flex items-start space-x-3 shadow-sm">
+              <div className="p-2 rounded-lg bg-slate-900 border border-slate-800 text-emerald-400">
+                <Shield className="h-4 w-4" />
+              </div>
+              <div>
+                <h3 className="text-xs font-semibold text-slate-200">Zero Cloud Storage</h3>
+                <p className="text-xs text-slate-400 mt-0.5 leading-relaxed">
+                  Only file names and hashes are indexed. No files ever sit on cloud servers.
+                </p>
+              </div>
+            </div>
+
+            <div className="bg-[#111726] border border-slate-800 rounded-xl p-4 flex items-start space-x-3 shadow-sm">
+              <div className="p-2 rounded-lg bg-slate-900 border border-slate-800 text-slate-300">
+                <Smartphone className="h-4 w-4" />
+              </div>
+              <div>
+                <h3 className="text-xs font-semibold text-slate-200">On-Demand Approval</h3>
+                <p className="text-xs text-slate-400 mt-0.5 leading-relaxed">
+                  Your phone sleeps until you request a file and tap Allow on the notification.
+                </p>
+              </div>
+            </div>
+          </div>
+
+          {/* Action Controls & Catalog Heading */}
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-1">
+            <div>
+              <h2 className="text-base font-semibold text-white tracking-tight">Available Files</h2>
+              <p className="text-xs text-slate-400">Select any file to stream directly to your downloads</p>
+            </div>
+            <ManualRequestForm onSubmit={(item) => setActiveTransferFile(item)} />
+          </div>
+
+          {/* File Table */}
+          <CatalogTable
+            files={catalog?.files || []}
+            vaultId={vaultId}
+            onRequestFile={(item) => setActiveTransferFile(item)}
+          />
+        </main>
+
+        {/* Transfer Modal */}
+        {activeTransferFile && (
+          <TransferModal
+            file={activeTransferFile}
+            backendUrl={backendUrl}
+            vaultId={vaultId}
+            onClose={() => setActiveTransferFile(null)}
+          />
+        )}
+
+        {/* Footer */}
+        <footer className="border-t border-slate-800/80 py-4 px-6 text-center text-xs text-slate-500 bg-[#0d131f]">
+          LazyVault • Private Peer-to-Peer File Transfer Protocol
+        </footer>
+      </div>
+    </ErrorBoundary>
   );
 };

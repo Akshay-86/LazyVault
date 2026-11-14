@@ -52,7 +52,6 @@ class VaultDaemonService : Service() {
         // 24/7 background listener: receives Firestore request events even when app is minimized / screen off
         firebaseVaultManager?.startListeningForRequests { request ->
             Log.d(TAG, "Background daemon received request: ${request.requestId} for ${request.path}")
-            VaultNotificationManager.showTransferRequestNotification(this, request)
         }
 
         return START_STICKY

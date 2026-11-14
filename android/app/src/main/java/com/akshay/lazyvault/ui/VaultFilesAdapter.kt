@@ -38,10 +38,16 @@ class VaultFilesAdapter(
         holder.binding.textFileMeta.text = "$formattedSize  •  SHA: $shortSha"
 
         holder.binding.cardFileRoot.setOnClickListener {
-            onItemClick(item)
+            val pos = holder.bindingAdapterPosition
+            if (pos != RecyclerView.NO_POSITION) {
+                onItemClick(getItem(pos))
+            }
         }
         holder.binding.btnFileMenu.setOnClickListener {
-            onItemClick(item)
+            val pos = holder.bindingAdapterPosition
+            if (pos != RecyclerView.NO_POSITION) {
+                onItemClick(getItem(pos))
+            }
         }
     }
 

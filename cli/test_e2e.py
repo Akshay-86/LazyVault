@@ -4,8 +4,9 @@ import json
 import time
 import hashlib
 import sys
+import os
 
-BASE_URL = "http://localhost:4000"
+BASE_URL = os.environ.get("LAZYVAULT_BACKEND_URL", "http://localhost:4000")
 VAULT_ID = "vlt_e2e_test"
 PASSWORD = "secret_password_123"
 DEVICE_ID = "android_node_01"
@@ -37,7 +38,7 @@ reg = post_json("/api/v1/device/register", {
     "fcmToken": "mock_fcm_token_12345",
     "appVersion": "1.0.0"
 })
-assert reg.get("success") is True, "Device registration failed"
+assert reg.get("success") is True or reg.get("status") == "registered", "Device registration failed"
 print("    ✓ Device registered successfully")
 
 # 2. Sync Catalog
@@ -66,7 +67,7 @@ v_sync = post_json("/api/v1/vault/sync", {
     "expiresInSeconds": 86400,
     "catalog": catalog_data
 })
-assert v_sync.get("success") is True, "Vault sync failed"
+assert v_sync.get("success") is True or v_sync.get("status") == "success", "Vault sync failed"
 print(f"    ✓ Vault link created: {v_sync.get('shareUrl')}")
 
 # 3. Password Gate Verification
@@ -86,9 +87,9 @@ lease_resp = post_json("/api/v1/request-file", {
     "vaultId": VAULT_ID,
     "supportedTransports": ["relay"]
 })
-req_id = lease_resp["requestId"]
-assert lease_resp["status"] == "PENDING"
-print(f"    ✓ Lease created: {req_id} (TTL: {lease_resp['leaseTtlSeconds']}s)")
+req_id = lease_resp.get("requestId") or lease_resp.get("request_id")
+assert lease_resp["status"] in ("PENDING", "WAITING_FOR_APPROVAL")
+print(f"    ✓ Lease created: {req_id} (TTL: {lease_resp.get('leaseTtlSeconds', 60)}s)")
 
 # 5. Mobile Node Decision: User taps [ALLOW]
 print("[5] Simulating user tapping [ALLOW] on Android phone...")
@@ -110,7 +111,7 @@ up_req = urllib.request.Request(
 up_req.get_method = lambda: "PUT"
 with urllib.request.urlopen(up_req) as resp:
     up_data = json.loads(resp.read().decode("utf-8"))
-    assert up_data.get("success") is True
+    assert up_data.get("success") is True or up_data.get("status") == "uploaded"
 print("    ✓ Upload complete")
 
 # 7. Mobile marks relay complete

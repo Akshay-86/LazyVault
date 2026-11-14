@@ -26,7 +26,17 @@ export type RequestStatus =
   | 'TRANSFERRING'
   | 'COMPLETED'
   | 'EXPIRED'
+  | 'CANCELLED'
   | 'FAILED';
+
+export interface TransferProgress {
+  bytesReceived: number;
+  totalBytes: number;
+  progressPercent: number;
+  speedMBps: number;
+  speedMbps: number;
+  statusText: string;
+}
 
 export interface FileRequestResponse {
   request_id: string;
@@ -37,6 +47,7 @@ export interface FileRequestResponse {
   chosen_transport?: 'webrtc' | 'relay';
   expires_at: number;
   time_remaining_ms?: number;
+  ttl_seconds?: number;
   relay_metadata?: {
     downloadUrl: string;
     encryptionKeyB64: string;
@@ -44,6 +55,7 @@ export interface FileRequestResponse {
     authTagB64?: string;
     originalSha256: string;
     fileSizeBytes: number;
+    chunkCount?: number;
   };
   error?: string;
 }

@@ -23,33 +23,57 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 FIRESTORE_BASE = "https://firestore.googleapis.com/v1/projects/lazyvault-node/databases/(default)/documents"
 
-def http_get(url):
-    req = urllib.request.Request(url, headers={"User-Agent": "LazyVault-CICD-Runner/1.0"})
-    with urllib.request.urlopen(req) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+def http_get(url, retries=3, timeout=15):
+    last_err = None
+    for attempt in range(retries):
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "LazyVault-CICD-Runner/1.0"})
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except Exception as e:
+            last_err = e
+            if attempt < retries - 1:
+                time.sleep(1.0)
+    raise last_err or RuntimeError(f"Failed GET {url}")
 
-def http_post(url, data):
+def http_post(url, data, retries=3, timeout=15):
     body = json.dumps(data).encode("utf-8")
-    req = urllib.request.Request(url, data=body, headers={
-        "Content-Type": "application/json",
-        "User-Agent": "LazyVault-CICD-Runner/1.0"
-    })
-    with urllib.request.urlopen(req) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+    last_err = None
+    for attempt in range(retries):
+        try:
+            req = urllib.request.Request(url, data=body, headers={
+                "Content-Type": "application/json",
+                "User-Agent": "LazyVault-CICD-Runner/1.0"
+            })
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except Exception as e:
+            last_err = e
+            if attempt < retries - 1:
+                time.sleep(1.0)
+    raise last_err or RuntimeError(f"Failed POST {url}")
 
-def http_patch(url, data):
+def http_patch(url, data, retries=3, timeout=15):
     body = json.dumps(data).encode("utf-8")
-    req = urllib.request.Request(url, data=body, method="PATCH", headers={
-        "Content-Type": "application/json",
-        "User-Agent": "LazyVault-CICD-Runner/1.0"
-    })
-    with urllib.request.urlopen(req) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+    last_err = None
+    for attempt in range(retries):
+        try:
+            req = urllib.request.Request(url, data=body, method="PATCH", headers={
+                "Content-Type": "application/json",
+                "User-Agent": "LazyVault-CICD-Runner/1.0"
+            })
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except Exception as e:
+            last_err = e
+            if attempt < retries - 1:
+                time.sleep(1.0)
+    raise last_err or RuntimeError(f"Failed PATCH {url}")
 
-def http_delete(url):
+def http_delete(url, timeout=10):
     req = urllib.request.Request(url, method="DELETE", headers={"User-Agent": "LazyVault-CICD-Runner/1.0"})
     try:
-        with urllib.request.urlopen(req) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             return resp.read()
     except Exception:
         pass

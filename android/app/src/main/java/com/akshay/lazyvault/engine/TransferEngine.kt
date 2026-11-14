@@ -35,6 +35,27 @@ class TransferEngine(private val context: Context) {
         const val CHUNK_SIZE = 64 * 1024 // 64KB chunks for optimal throughput on high-speed Wi-Fi and direct LAN
         const val BUFFERED_AMOUNT_LOW_THRESHOLD = 1024 * 1024L // 1MB backpressure window to prevent socket buffer saturation and ICE consent starvation (RFC 7675)
         const val MAX_RELAY_FILE_SIZE_BYTES = 50 * 1024 * 1024L // 50MB maximum for cloud chunk relay to protect memory & quota
+
+        @Volatile private var isWebRtcInitialized = false
+        private val initLock = Any()
+
+        fun initWebRtc(context: Context) {
+            if (!isWebRtcInitialized) {
+                synchronized(initLock) {
+                    if (!isWebRtcInitialized) {
+                        try {
+                            PeerConnectionFactory.initialize(
+                                PeerConnectionFactory.InitializationOptions.builder(context)
+                                    .createInitializationOptions()
+                            )
+                            isWebRtcInitialized = true
+                        } catch (e: Exception) {
+                            Log.w("TransferEngine", "PeerConnectionFactory.initialize: ${e.message}")
+                        }
+                    }
+                }
+            }
+        }
     }
 
     private val storageManager = VaultStorageManager(context)
@@ -133,14 +154,14 @@ class TransferEngine(private val context: Context) {
     ): Boolean = withContext(Dispatchers.IO) {
         val firebaseVaultManager = FirebaseVaultManager(context)
         var callerCandSub: ListenerRegistration? = null
-        try {
-            // Initialize PeerConnectionFactory
-            PeerConnectionFactory.initialize(
-                PeerConnectionFactory.InitializationOptions.builder(context)
-                    .createInitializationOptions()
-            )
+        var factory: PeerConnectionFactory? = null
+        var peerConnection: PeerConnection? = null
+        var activeDataChannel: DataChannel? = null
 
-            val factory = PeerConnectionFactory.builder().createPeerConnectionFactory()
+        try {
+            // Initialize PeerConnectionFactory once
+            initWebRtc(context)
+            factory = PeerConnectionFactory.builder().createPeerConnectionFactory()
 
             val iceServers = listOf(
                 PeerConnection.IceServer.builder("stun:stun.l.google.com:19302").createIceServer(),
@@ -180,7 +201,6 @@ class TransferEngine(private val context: Context) {
 
                 if (restOffer == null) {
                     Log.d(TAG, "No WebRTC offer received from browser within 15s")
-                    factory.dispose()
                     return@withContext false
                 }
                 sdpString = restOffer.getString("sdp")
@@ -188,13 +208,10 @@ class TransferEngine(private val context: Context) {
 
             onProgress(20, "WebRTC offer received. Negotiating peer connection...")
 
-            var activeDataChannel: DataChannel? = null
             var channelOpened = false
             var iceFailed = false
             var isRemoteDescSet = false
             val queuedCandidates = mutableListOf<IceCandidate>()
-
-            var peerConnection: PeerConnection? = null
 
             val observer = object : PeerConnection.Observer {
                 override fun onSignalingChange(state: PeerConnection.SignalingState?) {
@@ -265,17 +282,18 @@ class TransferEngine(private val context: Context) {
                 }
             }
 
-            peerConnection = factory.createPeerConnection(rtcConfig, observer) ?: run {
-                factory.dispose()
-                return@withContext false
-            }
+            peerConnection = factory.createPeerConnection(rtcConfig, observer) ?: return@withContext false
 
             // Listen for caller candidates from browser via Firestore
             callerCandSub = firebaseVaultManager.listenToCallerCandidates(requestId) { sdp, sdpMid, sdpMLineIndex ->
                 val cand = IceCandidate(sdpMid, sdpMLineIndex, sdp)
                 synchronized(queuedCandidates) {
                     if (isRemoteDescSet) {
-                        peerConnection?.addIceCandidate(cand)
+                        try {
+                            peerConnection?.addIceCandidate(cand)
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Failed adding ice candidate: ${e.message}")
+                        }
                     } else {
                         queuedCandidates.add(cand)
                     }
@@ -291,7 +309,13 @@ class TransferEngine(private val context: Context) {
                     Log.d(TAG, "Remote description set successfully")
                     synchronized(queuedCandidates) {
                         isRemoteDescSet = true
-                        queuedCandidates.forEach { peerConnection?.addIceCandidate(it) }
+                        queuedCandidates.forEach {
+                            try {
+                                peerConnection?.addIceCandidate(it)
+                            } catch (e: Exception) {
+                                Log.w(TAG, "Failed adding queued ice candidate: ${e.message}")
+                            }
+                        }
                         queuedCandidates.clear()
                     }
 
@@ -350,9 +374,6 @@ class TransferEngine(private val context: Context) {
 
             if (!channelOpened || activeDataChannel == null || iceFailed) {
                 Log.w(TAG, "DataChannel did not open within timeout (iceFailed=$iceFailed)")
-                callerCandSub?.remove()
-                peerConnection.close()
-                factory.dispose()
                 return@withContext false
             }
 
@@ -378,9 +399,6 @@ class TransferEngine(private val context: Context) {
                     error = "File not found on device storage (${path.substringAfterLast('/')})"
                 )
                 onProgress(0, "Error: File not found on device storage")
-                callerCandSub?.remove()
-                peerConnection.close()
-                factory.dispose()
                 return@withContext false
             }
 
@@ -409,15 +427,20 @@ class TransferEngine(private val context: Context) {
                     }
 
                     // Retry sending until accepted by DataChannel buffer
+                    var sent = false
                     var retryCount = 0
-                    while (!dc.send(dataBuffer)) {
+                    while (!sent && retryCount < 1000) {
                         if (dc.state() != DataChannel.State.OPEN) break
-                        delay(2)
-                        retryCount++
-                        if (retryCount > 1000) { // 2s without accepting data
-                            Log.e(TAG, "DataChannel send stalled, state: ${dc.state()}")
-                            break
+                        sent = dc.send(dataBuffer)
+                        if (!sent) {
+                            delay(2)
+                            retryCount++
                         }
+                    }
+
+                    if (!sent) {
+                        Log.e(TAG, "DataChannel send stalled or failed, state: ${dc.state()}")
+                        break
                     }
                     bytesSent += read
 
@@ -443,9 +466,6 @@ class TransferEngine(private val context: Context) {
 
             if (bytesSent < fileLength) {
                 Log.e(TAG, "WebRTC transfer incomplete: sent $bytesSent of $fileLength bytes")
-                callerCandSub?.remove()
-                peerConnection.close()
-                factory.dispose()
                 return@withContext false
             }
 
@@ -462,14 +482,17 @@ class TransferEngine(private val context: Context) {
             firebaseVaultManager.updateRequestStatus(requestId, "COMPLETED")
             delay(1000)
 
-            callerCandSub?.remove()
-            peerConnection.close()
-            factory.dispose()
             true
         } catch (e: Exception) {
             Log.e(TAG, "WebRTC transfer exception", e)
-            callerCandSub?.remove()
             false
+        } finally {
+            try { callerCandSub?.remove() } catch (ignored: Exception) {}
+            try { activeDataChannel?.close() } catch (ignored: Exception) {}
+            try { activeDataChannel?.dispose() } catch (ignored: Exception) {}
+            try { peerConnection?.close() } catch (ignored: Exception) {}
+            try { peerConnection?.dispose() } catch (ignored: Exception) {}
+            try { factory?.dispose() } catch (ignored: Exception) {}
         }
     }
 
@@ -529,6 +552,8 @@ class TransferEngine(private val context: Context) {
             }
             val plaintext = inputStream.use { it.readBytes() }
             val ciphertext = cipher.doFinal(plaintext)
+            val tagBytes = if (ciphertext.size >= 16) ciphertext.copyOfRange(ciphertext.size - 16, ciphertext.size) else ByteArray(0)
+            val tagB64 = Base64.encodeToString(tagBytes, Base64.NO_WRAP)
 
             var relayUploaded = false
             if (backendUrl.isNotEmpty() && !backendUrl.contains("192.168.10.15")) {
@@ -545,7 +570,7 @@ class TransferEngine(private val context: Context) {
                         requestId = requestId,
                         ephemeralKeyB64 = keyB64,
                         ivB64 = ivB64,
-                        tagB64 = "",
+                        tagB64 = tagB64,
                         sizeBytes = ciphertext.size.toLong()
                     )
                     if (completeSuccess) {

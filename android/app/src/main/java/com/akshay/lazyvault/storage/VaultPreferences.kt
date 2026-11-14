@@ -90,7 +90,13 @@ class VaultPreferences(context: Context) {
         get() = prefs.getString("selected_folder_name", null)
         set(value) = prefs.edit().putString("selected_folder_name", value).apply()
 
+    @Volatile private var cachedUriMap: MutableMap<String, String>? = null
+    @Volatile private var cachedSizeMap: MutableMap<String, Long>? = null
+
     fun saveFileMappings(uriMap: Map<String, String>, sizeMap: Map<String, Long>) {
+        cachedUriMap = java.util.concurrent.ConcurrentHashMap(uriMap)
+        cachedSizeMap = java.util.concurrent.ConcurrentHashMap(sizeMap)
+
         val uriObj = JSONObject()
         for ((k, v) in uriMap) {
             uriObj.put(k, v)
@@ -106,26 +112,44 @@ class VaultPreferences(context: Context) {
     }
 
     fun getFileUri(key: String): String? {
+        cachedUriMap?.let { return it[key] }
         val raw = prefs.getString("file_uri_mappings", null) ?: return null
         return try {
             val obj = JSONObject(raw)
-            if (obj.has(key)) obj.getString(key) else null
+            val map = java.util.concurrent.ConcurrentHashMap<String, String>()
+            val keys = obj.keys()
+            while (keys.hasNext()) {
+                val k = keys.next()
+                map[k] = obj.getString(k)
+            }
+            cachedUriMap = map
+            map[key]
         } catch (e: Exception) {
             null
         }
     }
 
     fun getFileSize(key: String): Long {
+        cachedSizeMap?.let { return it[key] ?: 0L }
         val raw = prefs.getString("file_size_mappings", null) ?: return 0L
         return try {
             val obj = JSONObject(raw)
-            if (obj.has(key)) obj.getLong(key) else 0L
+            val map = java.util.concurrent.ConcurrentHashMap<String, Long>()
+            val keys = obj.keys()
+            while (keys.hasNext()) {
+                val k = keys.next()
+                map[k] = obj.getLong(k)
+            }
+            cachedSizeMap = map
+            map[key] ?: 0L
         } catch (e: Exception) {
             0L
         }
     }
 
     fun clearFileMappings() {
+        cachedUriMap = null
+        cachedSizeMap = null
         prefs.edit()
             .remove("file_uri_mappings")
             .remove("file_size_mappings")

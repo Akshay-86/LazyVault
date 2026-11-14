@@ -1,20 +1,16 @@
 /**
  * WebRTC DataChannel Receiver Pipeline for LazyVault Web Client
  * 100% Serverless via Cloud Firestore Signaling (with REST fallback)
- * Connects to mobile node, reassembles streamed binary chunks, computes SHA-256,
- * and triggers automatic browser download.
+ * Connects to mobile node, reassembles streamed binary chunks, computes SHA-256
+ * progressively using streaming hash, and triggers automatic browser download.
  */
 
 import { db } from './firebase.js';
 import { doc, collection, addDoc, setDoc, onSnapshot, Unsubscribe } from 'firebase/firestore';
+import { TransferProgress } from './types.js';
+import { StreamingSha256 } from './utils/crypto.js';
 
-export interface TransferProgress {
-  bytesReceived: number;
-  totalBytes: number;
-  progressPercent: number;
-  speedMbps: number;
-  statusText: string;
-}
+export { type TransferProgress };
 
 export class WebRTCReceiver {
   private pc: RTCPeerConnection | null = null;
@@ -28,15 +24,18 @@ export class WebRTCReceiver {
   private currentBatch: ArrayBuffer[] = [];
   private blobParts: Blob[] = [];
   private currentBatchBytes = 0;
-  private readonly BATCH_SIZE_BYTES = 32 * 1024 * 1024; // 32MB batching to avoid heap GC pressure on 3GB+ files
+  private readonly BATCH_SIZE_BYTES = 32 * 1024 * 1024; // 32MB native Blob batching to prevent V8 heap pressure
   private bytesReceived = 0;
   private startTime = 0;
   private sseSource: EventSource | null = null;
   private firestoreUnsubs: Unsubscribe[] = [];
   private isDestroyed = false;
+  private isCompleted = false;
   private isRemoteDescriptionSet = false;
   private queuedCandidates: RTCIceCandidateInit[] = [];
   private lastProgressUpdate = 0;
+  private completionTimeout: any = null;
+  private streamingHasher = new StreamingSha256();
 
   private onProgressCb?: (progress: TransferProgress) => void;
   private onCompleteCb?: (blob: Blob, sha256: string) => void;
@@ -56,9 +55,9 @@ export class WebRTCReceiver {
     this.requestId = params.requestId;
     this.backendUrl = params.backendUrl ? params.backendUrl.replace(/\/$/, '') : '';
     this.vaultId = params.vaultId;
-    this.expectedSha256 = params.expectedSha256.toLowerCase();
-    this.filename = params.filename;
-    this.totalSize = params.totalSize;
+    this.expectedSha256 = (params.expectedSha256 || '').toLowerCase().trim();
+    this.filename = params.filename || 'download';
+    this.totalSize = params.totalSize || 0;
     this.onProgressCb = params.onProgress;
     this.onCompleteCb = params.onComplete;
     this.onErrorCb = params.onError;
@@ -79,8 +78,14 @@ export class WebRTCReceiver {
 
       // Listen for ICE candidates and send to phone via Firestore
       this.pc.onicecandidate = async (event) => {
-        if (event.candidate) {
+        if (event.candidate && !this.isDestroyed) {
           const cand = event.candidate;
+          const candInit: RTCIceCandidateInit = {
+            candidate: cand.candidate,
+            sdpMid: cand.sdpMid,
+            sdpMLineIndex: cand.sdpMLineIndex,
+          };
+
           if (this.vaultId && db) {
             try {
               await addDoc(collection(db, 'vaults', this.vaultId, 'requests', this.requestId, 'callerCandidates'), {
@@ -94,39 +99,38 @@ export class WebRTCReceiver {
             }
           }
           if (this.backendUrl) {
-            this.sendSignalingMessage('candidate', cand.toJSON()).catch(() => {});
+            this.sendSignalingMessage('candidate', candInit).catch(() => {});
           }
         }
       };
 
       this.pc.onconnectionstatechange = async () => {
-        if (this.pc) {
-          console.log(`[WebRTC] Connection state: ${this.pc.connectionState}`);
-          if (this.pc.connectionState === 'connected') {
-            let connectionType = 'Direct P2P';
-            try {
-              const stats = await this.pc.getStats();
-              stats.forEach((report) => {
-                if (report.type === 'candidate-pair' && report.state === 'succeeded' && (report.selected || report.nominated)) {
-                  const localCand = stats.get(report.localCandidateId);
-                  const remoteCand = stats.get(report.remoteCandidateId);
-                  const localType = localCand?.candidateType || 'unknown';
-                  const remoteType = remoteCand?.candidateType || 'unknown';
-                  console.log(`[WebRTC] Active ICE Pair: Local=${localType} (${localCand?.ip || localCand?.address}:${localCand?.port}) <--> Remote=${remoteType} (${remoteCand?.ip || remoteCand?.address}:${remoteCand?.port})`);
-                  if (localType === 'host' && remoteType === 'host') {
-                    connectionType = 'Ultra-Fast Direct LAN';
-                  } else if (localType === 'srflx' || remoteType === 'srflx') {
-                    connectionType = 'Router NAT Hairpin';
-                  }
+        if (!this.pc || this.isDestroyed) return;
+        console.log(`[WebRTC] Connection state: ${this.pc.connectionState}`);
+        if (this.pc.connectionState === 'connected') {
+          let connectionType = 'Direct P2P';
+          try {
+            const stats = await this.pc.getStats();
+            stats.forEach((report) => {
+              if (report.type === 'candidate-pair' && report.state === 'succeeded' && (report.selected || report.nominated)) {
+                const localCand = stats.get(report.localCandidateId);
+                const remoteCand = stats.get(report.remoteCandidateId);
+                const localType = localCand?.candidateType || 'unknown';
+                const remoteType = remoteCand?.candidateType || 'unknown';
+                console.log(`[WebRTC] Active ICE Pair: Local=${localType} (${localCand?.ip || localCand?.address}:${localCand?.port}) <--> Remote=${remoteType} (${remoteCand?.ip || remoteCand?.address}:${remoteCand?.port})`);
+                if (localType === 'host' && remoteType === 'host') {
+                  connectionType = 'Ultra-Fast Direct LAN';
+                } else if (localType === 'srflx' || remoteType === 'srflx') {
+                  connectionType = 'Router NAT Hairpin';
                 }
-              });
-            } catch (e) {
-              console.warn('[WebRTC] Stats inspection error:', e);
-            }
-            this.updateProgress(25, `${connectionType} connection established!`);
-          } else if (this.pc.connectionState === 'failed') {
-            this.onErrorCb?.(new Error('WebRTC direct P2P connection failed. Check device network.'));
+              }
+            });
+          } catch (e) {
+            console.warn('[WebRTC] Stats inspection error:', e);
           }
+          this.updateProgress(25, `${connectionType} connection established!`);
+        } else if (this.pc.connectionState === 'failed') {
+          this.onErrorCb?.(new Error('WebRTC direct P2P connection failed. Check device network.'));
         }
       };
 
@@ -166,11 +170,13 @@ export class WebRTCReceiver {
                 this.isRemoteDescriptionSet = true;
                 this.updateProgress(15, 'Remote answer received. Punching NAT hole...');
 
-                // Drain queued ICE candidates
-                for (const c of this.queuedCandidates) {
-                  await this.pc.addIceCandidate(new RTCIceCandidate(c)).catch(console.warn);
+                // Drain queued ICE candidates safely
+                while (this.queuedCandidates.length > 0) {
+                  const c = this.queuedCandidates.shift();
+                  if (c && this.pc) {
+                    await this.pc.addIceCandidate(new RTCIceCandidate(c)).catch(console.warn);
+                  }
                 }
-                this.queuedCandidates = [];
               } catch (e) {
                 console.error('[WebRTC] Failed setting remote description:', e);
               }
@@ -193,7 +199,7 @@ export class WebRTCReceiver {
                     sdpMid: candData.sdpMid,
                     sdpMLineIndex: candData.sdpMLineIndex,
                   };
-                  if (this.isRemoteDescriptionSet) {
+                  if (this.isRemoteDescriptionSet && this.pc) {
                     await this.pc.addIceCandidate(new RTCIceCandidate(candidateInit)).catch(console.warn);
                   } else {
                     this.queuedCandidates.push(candidateInit);
@@ -224,19 +230,40 @@ export class WebRTCReceiver {
     channel.binaryType = 'arraybuffer';
 
     channel.onopen = () => {
+      if (this.isDestroyed) {
+        try { channel.close(); } catch {}
+        return;
+      }
       console.log('[WebRTC] DataChannel OPENED!');
       this.startTime = Date.now();
       this.updateProgress(0, 'Direct P2P DataChannel open. Streaming chunks...');
     };
 
     channel.onmessage = async (event) => {
-      const data = event.data;
+      if (this.isDestroyed || this.isCompleted) return;
+      let data = event.data;
+
+      // Handle Blob conversion if browser delivers as Blob
+      if (data instanceof Blob) {
+        try {
+          data = await data.arrayBuffer();
+        } catch {
+          return;
+        }
+      }
 
       // Check if message is a JSON control signal (e.g. EOF or ERROR)
       if (typeof data === 'string') {
         try {
           const control = JSON.parse(data);
           if (control.type === 'EOF') {
+            if (this.completionTimeout) {
+              clearTimeout(this.completionTimeout);
+              this.completionTimeout = null;
+            }
+            if (control.totalBytes && !this.totalSize) {
+              this.totalSize = control.totalBytes;
+            }
             await this.handleTransferCompletion(control.sha256);
             return;
           } else if (control.type === 'ERROR') {
@@ -250,6 +277,9 @@ export class WebRTCReceiver {
       }
 
       if (data instanceof ArrayBuffer) {
+        // Feed into streaming SHA-256 hasher on-the-fly
+        this.streamingHasher.update(data);
+
         this.currentBatch.push(data);
         this.currentBatchBytes += data.byteLength;
         this.bytesReceived += data.byteLength;
@@ -265,25 +295,30 @@ export class WebRTCReceiver {
         if (now - this.lastProgressUpdate >= 150 || (this.totalSize > 0 && this.bytesReceived >= this.totalSize)) {
           this.lastProgressUpdate = now;
           const durationSec = Math.max(0.001, (now - this.startTime) / 1000);
-          const speedMbps = ((this.bytesReceived * 8) / (1024 * 1024)) / durationSec;
+          const speedMBps = (this.bytesReceived / (1024 * 1024)) / durationSec;
           const percent = this.totalSize > 0
             ? Math.min(100, Math.round((this.bytesReceived / this.totalSize) * 100))
             : 50;
 
           this.updateProgress(
             percent,
-            `Streaming P2P: ${(this.bytesReceived / 1024 / 1024).toFixed(2)} MB (${speedMbps.toFixed(2)} Mbps)`,
-            speedMbps
+            `Streaming P2P: ${(this.bytesReceived / 1024 / 1024).toFixed(2)} MB (${speedMBps.toFixed(2)} MB/s)`,
+            speedMBps
           );
         }
 
-        // Auto EOF check if total size reached
+        // Auto EOF check if total size reached (with debounce and cancellation guard)
         if (this.totalSize > 0 && this.bytesReceived >= this.totalSize) {
-          setTimeout(() => {
-            if (this.blobParts.length > 0 || this.currentBatch.length > 0) {
-              this.handleTransferCompletion();
-            }
-          }, 300);
+          if (!this.completionTimeout) {
+            this.completionTimeout = setTimeout(() => {
+              this.completionTimeout = null;
+              if (!this.isCompleted && !this.isDestroyed) {
+                if (this.blobParts.length > 0 || this.currentBatch.length > 0) {
+                  this.handleTransferCompletion();
+                }
+              }
+            }, 300);
+          }
         }
       }
     };
@@ -301,7 +336,9 @@ export class WebRTCReceiver {
         } catch {
           // Firefox Restricted XPCOM RTCError object
         }
-        this.onErrorCb?.(new Error(`DataChannel closed: ${detail}`));
+        if (!this.isCompleted && !this.isDestroyed) {
+          this.onErrorCb?.(new Error(`DataChannel closed: ${detail}`));
+        }
       }
     };
 
@@ -311,7 +348,14 @@ export class WebRTCReceiver {
   }
 
   private async handleTransferCompletion(reportedSha?: string) {
+    if (this.isCompleted || this.isDestroyed) return;
     if (this.blobParts.length === 0 && this.currentBatch.length === 0) return;
+
+    this.isCompleted = true;
+    if (this.completionTimeout) {
+      clearTimeout(this.completionTimeout);
+      this.completionTimeout = null;
+    }
 
     this.updateProgress(100, 'Verifying cryptographic SHA-256 integrity...');
 
@@ -325,29 +369,24 @@ export class WebRTCReceiver {
     const blob = new Blob(this.blobParts, { type: 'application/octet-stream' });
     this.blobParts = []; // Free memory
 
-    // Compute SHA-256 via Web Crypto API (for files < 150MB to prevent memory exhaustion on 700MB+ transfers)
-    let computedSha256 = '';
-    if (blob.size < 150 * 1024 * 1024 && typeof window !== 'undefined' && window.crypto && window.crypto.subtle) {
-      try {
-        const arrayBuffer = await blob.arrayBuffer();
-        const hashBuffer = await crypto.subtle.digest('SHA-256', arrayBuffer);
-        const hashArray = Array.from(new Uint8Array(hashBuffer));
-        computedSha256 = hashArray.map(b => b.toString(16).padStart(2, '0')).join('').toLowerCase();
-      } catch (e) {
-        console.warn('[WebRTC] In-memory digest allocation warning, using device verified SHA-256:', e);
-        if (reportedSha) computedSha256 = reportedSha.toLowerCase();
-      }
-    } else if (reportedSha) {
-      computedSha256 = reportedSha.toLowerCase();
-    } else if (this.expectedSha256) {
-      computedSha256 = this.expectedSha256.toLowerCase();
-    }
+    // Finalize computed SHA-256 from the progressive streaming hasher
+    let computedSha256 = this.streamingHasher.digest();
 
     console.log(`[WebRTC] Computed SHA-256: ${computedSha256}`);
     console.log(`[WebRTC] Expected SHA-256: ${this.expectedSha256}`);
+    if (reportedSha) {
+      console.log(`[WebRTC] Reported SHA-256: ${reportedSha}`);
+    }
 
-    if (computedSha256 && this.expectedSha256 && computedSha256 !== this.expectedSha256) {
-      const err = new Error(`Integrity check failed! Expected ${this.expectedSha256}, got ${computedSha256}`);
+    // Cryptographic verification against expected checksum
+    if (this.expectedSha256) {
+      if (computedSha256 !== this.expectedSha256) {
+        const err = new Error(`Integrity check failed! Expected ${this.expectedSha256}, got ${computedSha256}`);
+        this.onErrorCb?.(err);
+        return;
+      }
+    } else if (reportedSha && computedSha256 !== reportedSha.toLowerCase()) {
+      const err = new Error(`Integrity check failed! Device reported ${reportedSha}, got ${computedSha256}`);
       this.onErrorCb?.(err);
       return;
     }
@@ -372,29 +411,41 @@ export class WebRTCReceiver {
   }
 
   private triggerDownload(blob: Blob, filename: string) {
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    setTimeout(() => {
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-    }, 1000);
+    try {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename || 'download';
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => {
+        try {
+          if (document.body.contains(a)) {
+            document.body.removeChild(a);
+          }
+          URL.revokeObjectURL(url);
+        } catch {}
+      }, 1500);
+    } catch (e) {
+      console.error('[WebRTC] Download trigger error:', e);
+    }
   }
 
   private async sendSignalingMessage(type: string, payload: any) {
     if (!this.backendUrl) return;
-    await fetch(`${this.backendUrl}/api/v1/signaling/${this.requestId}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        sender: 'client',
-        type,
-        payload,
-      }),
-    });
+    try {
+      await fetch(`${this.backendUrl}/api/v1/signaling/${this.requestId}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sender: 'client',
+          type,
+          payload,
+        }),
+      });
+    } catch (e) {
+      console.warn('[WebRTC] Signaling send error:', e);
+    }
   }
 
   private listenToSignalingSSE() {
@@ -416,12 +467,14 @@ export class WebRTCReceiver {
           this.isRemoteDescriptionSet = true;
           this.updateProgress(15, 'Received peer answer. Establishing P2P hole punch...');
 
-          for (const c of this.queuedCandidates) {
-            await this.pc.addIceCandidate(new RTCIceCandidate(c)).catch(console.warn);
+          while (this.queuedCandidates.length > 0) {
+            const c = this.queuedCandidates.shift();
+            if (c && this.pc) {
+              await this.pc.addIceCandidate(new RTCIceCandidate(c)).catch(console.warn);
+            }
           }
-          this.queuedCandidates = [];
         } else if (msg.type === 'candidate') {
-          if (this.isRemoteDescriptionSet) {
+          if (this.isRemoteDescriptionSet && this.pc) {
             await this.pc.addIceCandidate(new RTCIceCandidate(msg.payload)).catch(console.warn);
           } else {
             this.queuedCandidates.push(msg.payload);
@@ -435,36 +488,50 @@ export class WebRTCReceiver {
     this.sseSource.onerror = () => {};
   }
 
-  private updateProgress(percent: number, statusText: string, speedMbps = 0) {
+  private updateProgress(percent: number, statusText: string, speedMBps = 0) {
     this.onProgressCb?.({
       bytesReceived: this.bytesReceived,
       totalBytes: this.totalSize,
       progressPercent: percent,
-      speedMbps,
+      speedMBps,
+      speedMbps: speedMBps * 8,
       statusText,
     });
   }
 
   public close(): void {
     this.isDestroyed = true;
+    if (this.completionTimeout) {
+      clearTimeout(this.completionTimeout);
+      this.completionTimeout = null;
+    }
     for (const unsub of this.firestoreUnsubs) {
       try { unsub(); } catch {}
     }
     this.firestoreUnsubs = [];
     if (this.sseSource) {
-      this.sseSource.close();
+      this.sseSource.onmessage = null;
+      this.sseSource.onerror = null;
+      try { this.sseSource.close(); } catch {}
       this.sseSource = null;
     }
     if (this.dataChannel) {
-      this.dataChannel.close();
+      this.dataChannel.onopen = null;
+      this.dataChannel.onmessage = null;
+      this.dataChannel.onerror = null;
+      this.dataChannel.onclose = null;
+      try { this.dataChannel.close(); } catch {}
       this.dataChannel = null;
     }
     if (this.pc) {
-      this.pc.close();
+      this.pc.onicecandidate = null;
+      this.pc.onconnectionstatechange = null;
+      try { this.pc.close(); } catch {}
       this.pc = null;
     }
     this.blobParts = [];
     this.currentBatch = [];
     this.currentBatchBytes = 0;
+    this.queuedCandidates = [];
   }
 }

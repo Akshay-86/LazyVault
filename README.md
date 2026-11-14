@@ -97,7 +97,7 @@ Traditional remote storage solutions require running an always-on server, keepin
 ### 🛡️ Large File Transfer & Safety Safeguards (1 GB+ Protection)
 * **Direct WebRTC P2P for Big Files**: Direct peer-to-peer streaming operates without arbitrary file size limits (from 1 MB to 10+ GB), reading through a continuous 64KB buffer using under 4 MB of device RAM.
 * **Memory & Quota Circuit Breaker**: The cloud chunk relay fallback enforces a strict 50 MB limit (`MAX_RELAY_FILE_SIZE_BYTES`). If WebRTC is blocked by cellular carrier NAT on a large file (>50 MB), the transfer fails safely and cleanly rather than attempting to buffer gigabytes into mobile RAM (preventing `OutOfMemoryError`) or exhausting daily Firestore document write quotas.
-* **Cellular Data Allowance Warnings**: Android notifications and in-app approval cards highlight `⚠️ Large File (X GB) — Wi-Fi Recommended` for any request $\ge 100\text{ MB}$, ensuring device owners do not inadvertently exhaust cellular mobile data.
+* **Cellular Data Allowance Warnings**: Android system heads-up notifications highlight `⚠️ Large File (X GB) — Wi-Fi Recommended` for any request $\ge 100\text{ MB}$, ensuring device owners do not inadvertently exhaust cellular mobile data.
 * **Web Portal Badges & Advisory**: Files $\ge 100\text{ MB}$ in the catalog display a `Large P2P` pill badge and prompt users in the download modal to verify the host phone is awake and on Wi-Fi for maximum throughput.
 
 ---
@@ -118,16 +118,31 @@ LazyVault/
 │   │       ├── net/               # Firebase Firestore manager and API clients
 │   │       ├── service/           # UIDT JobService, FCM listener, ActionReceiver
 │   │       └── storage/           # SAF file manager, catalog cache, preferences
+│   └── README.md                  # Android documentation
+├── backend/                       # Request Broker & Ephemeral Relay (Node.js, Express, TypeScript, WebSocket)
+│   ├── src/
+│   │   ├── index.ts               # Express & WebSocket server, rate limiting, graceful shutdown
+│   │   ├── store.ts               # Catalog store, request state machine, device persistence
+│   │   ├── relay.ts               # Zero-trust single-use ephemeral relay service
+│   │   ├── routes/                # Catalog, request, signaling, relay, device, vault routes
+│   │   └── middleware/            # Multi-tier sliding-window rate limiters
+│   ├── package.json               # Backend dependencies & npm scripts (build, test, dev)
+│   └── tsconfig.json              # TypeScript compiler configuration
 ├── web/                           # Web Dashboard (React, TypeScript, Tailwind CSS, Vite)
 │   ├── src/
 │   │   ├── App.tsx                # Main catalog browser, validation & status screens
 │   │   ├── firebase.ts            # Cloud Firestore web initialization
 │   │   ├── webrtc.ts              # WebRTC DataChannel receiver and SHA-256 validator
-│   │   └── components/            # PasswordGate, TransferModal, CatalogTable
+│   │   └── components/            # PasswordGate, TransferModal, CatalogTable, ErrorBoundary
 │   └── README.md                  # Web portal documentation
-├── cli/                           # Headless CI/CD Client (Python 3 Firestore relay script)
-│   ├── lazyvault-get.py           # Zero-trust serverless CLI client
-│   └── README.md                  # CLI documentation
+├── cli/                           # Headless CI/CD Client (Python 3 Firestore & REST relay client)
+│   ├── lazyvault-get.py           # Zero-trust dual-engine CLI client
+│   ├── test_e2e.py                # Automated CLI integration test suite
+│   └── README.md                  # Comprehensive CLI documentation
+├── scripts/                       # Testing & simulation tools
+│   ├── e2e_test.py                # Full system end-to-end simulation runner
+│   └── simulate_phone.py          # Interactive terminal mobile node emulator
+├── cicd_pipeline_test.py          # CI/CD zero-trust pipeline integration simulator
 ├── firebase.json                  # Firebase Multi-Site Hosting & Firestore configuration
 ├── firestore.rules                # Cloud Firestore security & access rules
 ├── .gitignore                     # Monorepo git hygiene rules
@@ -207,7 +222,16 @@ npm run dev
 # Dashboard running locally at http://localhost:3000
 ```
 
-#### 3. Deploy Web Dashboard to Firebase Hosting
+#### 3. Run the Backend Broker & Ephemeral Relay (Self-Hosted / Hybrid Mode)
+```bash
+cd backend
+npm install
+npm run build
+npm test       # Run 7-step zero-trust integration test suite
+npm run dev    # Start broker dev server on http://localhost:4000
+```
+
+#### 4. Deploy Web Dashboard to Firebase Hosting
 ```bash
 cd web
 npm run build
@@ -255,13 +279,13 @@ The workflow works automatically out of the box with zero secrets by falling bac
 | **Man-in-the-Middle (MITM)** | WebRTC P2P DataChannels enforce mandatory DTLS-SRTP end-to-end encryption. In relay mode, files are encrypted on-device with AES-256-GCM using ephemeral keys. |
 | **Tampered / Corrupted Payloads** | Payloads are streamed into browser memory and checked against the original SHA-256 hash using the Web Crypto API (`crypto.subtle.digest`) before the browser saves the file. |
 | **Memory Exhaustion (OOM) & Relay Abuse** | Large files are never buffered into RAM. WebRTC P2P streams continuous 64KB frames with cooperative backpressure pacing. If P2P fails, the cloud relay strictly enforces a **50 MB circuit breaker** (`MAX_RELAY_FILE_SIZE_BYTES`) to prevent mobile heap exhaustion and conserve Firestore write quotas. |
-| **Cellular Data Allowance Drain** | Requests $\ge 100\text{ MB}$ trigger prominent `⚠️ Large File (X GB) — Wi-Fi Recommended` alerts in Android heads-up prompts and in-app cards before the user can tap `[ALLOW]`. |
+| **Cellular Data Allowance Drain** | Requests $\ge 100\text{ MB}$ trigger prominent `⚠️ Large File (X GB) — Wi-Fi Recommended` alerts in Android heads-up notification prompts before the user can tap `[ALLOW]`. |
 
 ---
 
 ## 8. Headless CI/CD Client (`cli/`)
 
-For automated CI/CD runners (GitHub Actions, GitLab CI, Buildkite, Jenkins) to pull files dynamically from your Android phone via serverless encrypted relay:
+For automated CI/CD runners (GitHub Actions, GitLab CI, Buildkite, Jenkins) to pull files dynamically from your Android phone via serverless encrypted relay or self-hosted REST broker:
 
 ```bash
 # Direct by Vault ID
@@ -271,31 +295,46 @@ python3 cli/lazyvault-get.py \
   --output ./model_weights.bin \
   --timeout 60
 
+# Password-Protected Vault
+python3 cli/lazyvault-get.py \
+  --vault-id "vlt_51f0ba6084" \
+  --path "production_secrets.env" \
+  --password "SecretPasscode123" \
+  --output ./.env
+
 # Or using the shareable web URL
 python3 cli/lazyvault-get.py \
   --backend-url "https://lazyvault.web.app/v/vlt_51f0ba6084" \
   --path "img.jpg" \
   --output ./downloaded_image.jpg
+
+# Or targeting local / self-hosted REST broker
+python3 cli/lazyvault-get.py \
+  --backend-url "http://localhost:4000" \
+  --path "dataset.tar.gz" \
+  --output ./dataset.tar.gz
 ```
 
 ### GitHub Actions Workflow Example
 ```yaml
       - name: Fetch Asset from LazyVault Node
+        env:
+          LAZYVAULT_ID: ${{ secrets.LAZYVAULT_ID }}
+          LAZYVAULT_PASSWORD: ${{ secrets.LAZYVAULT_PASSWORD }}
         run: |
           python3 -m pip install cryptography --quiet
           curl -fsSL https://raw.githubusercontent.com/Akshay-86/LazyVault/main/cli/lazyvault-get.py -o /tmp/lazyvault-get.py
           
           python3 /tmp/lazyvault-get.py \
-            --vault-id "${{ secrets.LAZYVAULT_ID }}" \
             --path "img.jpg" \
             --output /tmp/vault_asset.raw
 ```
 
-1. The script dispatches a single-use lease request directly to Cloud Firestore.
+1. The script dispatches a single-use lease request directly to Cloud Firestore (or REST broker).
 2. Your phone displays a heads-up approval notification: `[ALLOW]` / `[DENY]`.
 3. You tap **[ALLOW]**.
 4. The phone encrypts the file on-device with AES-256-GCM and streams chunks through the zero-trust cloud relay.
-5. The CLI reassembles, decrypts, validates the SHA-256 checksum against the catalog, purges the relay chunks from Firestore, and exits `0`.
+5. The CLI reassembles, decrypts, validates the SHA-256 checksum against the catalog, purges the relay chunks from the cloud relay, and exits `0`.
 
 ---
 

@@ -45,7 +45,7 @@ def log_error(msg):
     print(f"{RED}{BOLD}[ERROR]{RESET} {msg}", file=sys.stderr, flush=True)
 
 
-def make_request(url, method="GET", data=None, headers=None):
+def make_request(url, method="GET", data=None, headers=None, retries=3, timeout=30):
     if headers is None:
         headers = {}
     headers.setdefault("User-Agent", "LazyVault-CI-Client/2.0")
@@ -55,21 +55,36 @@ def make_request(url, method="GET", data=None, headers=None):
         headers["Content-Type"] = "application/json"
         body_bytes = json.dumps(data).encode("utf-8")
 
-    req = urllib.request.Request(url, data=body_bytes, headers=headers, method=method)
-    try:
-        with urllib.request.urlopen(req) as resp:
-            content = resp.read()
-            content_type = resp.headers.get_content_type()
-            if content_type == "application/json" or (content.startswith(b"{") and content.endswith(b"}")):
-                return json.loads(content.decode("utf-8"))
-            return content
-    except urllib.error.HTTPError as e:
-        err_msg = e.read().decode("utf-8", errors="replace")
+    last_err = None
+    for attempt in range(retries):
+        req = urllib.request.Request(url, data=body_bytes, headers=headers, method=method)
         try:
-            err_json = json.loads(err_msg)
-            raise RuntimeError(f"HTTP {e.code}: {err_json.get('error', err_msg)}")
-        except Exception:
-            raise RuntimeError(f"HTTP {e.code}: {err_msg}")
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                content = resp.read()
+                content_type = resp.headers.get_content_type()
+                if content_type == "application/json" or (content.startswith(b"{") and content.endswith(b"}")):
+                    try:
+                        return json.loads(content.decode("utf-8"))
+                    except Exception:
+                        return content
+                return content
+        except urllib.error.HTTPError as e:
+            err_msg = e.read().decode("utf-8", errors="replace")
+            # If 400, 401, 403, 404, 409, 410, don't retry - raise directly
+            if e.code in (400, 401, 403, 404, 409, 410):
+                try:
+                    err_json = json.loads(err_msg)
+                    raise RuntimeError(f"HTTP {e.code}: {err_json.get('error', err_msg)}")
+                except Exception:
+                    raise RuntimeError(f"HTTP {e.code}: {err_msg}")
+            last_err = RuntimeError(f"HTTP {e.code}: {err_msg}")
+        except Exception as e:
+            last_err = e
+
+        if attempt < retries - 1:
+            time.sleep(0.5 * (attempt + 1))
+
+    raise last_err or RuntimeError(f"Failed request to {url}")
 
 
 # ==========================================
@@ -130,11 +145,22 @@ def to_firestore_fields(d):
 def decrypt_aes_gcm(ciphertext_with_tag, key_bytes, iv_bytes, auth_tag_bytes=None):
     """
     Decrypts AES-256-GCM using python cryptography if available,
-    falling back to OpenSSL CLI if necessary.
+    falling back to OpenSSL CLI and PyCryptodome if necessary.
+    Handles both standalone auth_tag_bytes and appended 16-byte tag.
     """
-    full_payload = ciphertext_with_tag
-    if auth_tag_bytes and not full_payload.endswith(auth_tag_bytes):
-        full_payload = ciphertext_with_tag + auth_tag_bytes
+    if auth_tag_bytes and len(auth_tag_bytes) == 16:
+        tag_bytes = auth_tag_bytes
+        if ciphertext_with_tag.endswith(auth_tag_bytes):
+            actual_cipher = ciphertext_with_tag[:-16]
+        else:
+            actual_cipher = ciphertext_with_tag
+    else:
+        if len(ciphertext_with_tag) < 16:
+            raise ValueError("Ciphertext too short to contain AES-GCM 16-byte authentication tag")
+        tag_bytes = ciphertext_with_tag[-16:]
+        actual_cipher = ciphertext_with_tag[:-16]
+
+    full_payload = actual_cipher + tag_bytes
 
     # Method 1: Try Python `cryptography` package
     try:
@@ -144,12 +170,11 @@ def decrypt_aes_gcm(ciphertext_with_tag, key_bytes, iv_bytes, auth_tag_bytes=Non
     except ImportError:
         pass
 
-    # Method 2: OpenSSL CLI fallback (present on Linux/macOS runners)
+    # Method 2: OpenSSL CLI fallback (present on standard Linux/macOS runners)
     try:
         key_hex = key_bytes.hex()
         iv_hex = iv_bytes.hex()
-        tag_hex = auth_tag_bytes.hex() if auth_tag_bytes else full_payload[-16:].hex()
-        actual_cipher = full_payload[:-16] if not auth_tag_bytes else ciphertext_with_tag
+        tag_hex = tag_bytes.hex()
 
         cmd = [
             "openssl", "enc", "-d", "-aes-256-gcm",
@@ -167,17 +192,15 @@ def decrypt_aes_gcm(ciphertext_with_tag, key_bytes, iv_bytes, auth_tag_bytes=Non
         if proc.returncode == 0:
             return plaintext
         else:
-            log_warn(f"OpenSSL fallback warning: {stderr.decode()}")
+            log_warn(f"OpenSSL fallback warning: {stderr.decode(errors='ignore')}")
     except Exception as e:
         log_warn(f"OpenSSL fallback execution failed: {e}")
 
     # Method 3: PyCryptodome fallback
     try:
         from Cryptodome.Cipher import AES
-        tag = full_payload[-16:]
-        data = full_payload[:-16]
         cipher = AES.new(key_bytes, AES.MODE_GCM, nonce=iv_bytes)
-        return cipher.decrypt_and_verify(data, tag)
+        return cipher.decrypt_and_verify(actual_cipher, tag_bytes)
     except ImportError:
         pass
 
@@ -197,12 +220,25 @@ class FirestoreRelayEngine:
         self.vault_id = vault_id
         self.base_url = f"https://firestore.googleapis.com/v1/projects/{project_id}/databases/(default)/documents/vaults/{vault_id}"
 
-    def resolve_target(self, target_path, target_sha256):
+    def resolve_target(self, target_path, target_sha256, password=None):
         """Attempts to match target in vault catalog doc if accessible"""
         vault_url = f"{self.base_url}?key={self.api_key}"
         try:
             doc = make_request(vault_url)
             parsed = parse_firestore_doc(doc)
+
+            # Check password protection if present
+            stored_hash = (parsed.get("passwordHash") or "").strip().lower()
+            if stored_hash:
+                if not password:
+                    log_error(f"Vault '{self.vault_id}' is protected with a passcode. Please supply --password.")
+                    sys.exit(1)
+                computed_hash = hashlib.sha256(password.encode("utf-8")).hexdigest().lower()
+                if computed_hash != stored_hash:
+                    log_error("Incorrect vault passcode provided via --password.")
+                    sys.exit(1)
+                log_success("Vault passcode verified.")
+
             files = parsed.get("files", [])
             for f in files:
                 if not isinstance(f, dict):
@@ -302,7 +338,7 @@ class FirestoreRelayEngine:
                     return data.get("relayMetadata") or {}
 
             except Exception:
-                # Network glitch or transient read error
+                # Transient read glitch
                 pass
 
             time.sleep(poll_interval)
@@ -355,6 +391,142 @@ class FirestoreRelayEngine:
 
 
 # ==========================================
+# Transport: REST Broker Engine
+# ==========================================
+
+class RestBrokerEngine:
+    def __init__(self, backend_url):
+        self.backend_url = backend_url.rstrip("/")
+
+    def resolve_target(self, target_path, target_sha256, vault_id=None, password=None):
+        """Attempts to match target against REST broker catalog"""
+        # If vault_id is given, try authenticated vault catalog retrieval
+        if vault_id:
+            try:
+                auth_resp = make_request(
+                    f"{self.backend_url}/api/v1/vault/{vault_id}/auth",
+                    method="POST",
+                    data={"password": password or ""}
+                )
+                if isinstance(auth_resp, dict) and auth_resp.get("catalog"):
+                    cat = auth_resp.get("catalog")
+                    files = cat.get("files", []) if isinstance(cat, dict) else []
+                    for f in files:
+                        name = f.get("name", "")
+                        path = f.get("path", "")
+                        sha = f.get("sha256", "")
+                        if (target_path and (path == target_path or name == target_path or path.endswith("/" + target_path))) or \
+                           (target_sha256 and sha.lower() == target_sha256.lower()):
+                            log_info(f"Resolved from authenticated vault catalog: '{name}' (SHA-256: {sha[:12]}..., Size: {f.get('size', 0)} bytes)")
+                            return sha, path or name, name or os.path.basename(path)
+            except RuntimeError as e:
+                if "401" in str(e):
+                    log_error(f"Incorrect vault passcode for vault '{vault_id}'. Specify valid passcode via --password.")
+                    sys.exit(1)
+                elif "410" in str(e):
+                    log_error(f"Vault '{vault_id}' share link has expired.")
+                    sys.exit(1)
+                else:
+                    log_warn(f"Vault catalog lookup note: {e}")
+
+        # Fallback to general broker catalog
+        try:
+            cat = make_request(f"{self.backend_url}/api/v1/catalog")
+            files = cat.get("files", []) if isinstance(cat, dict) else []
+            for f in files:
+                name = f.get("name", "")
+                path = f.get("path", "")
+                sha = f.get("sha256", "")
+                if (target_path and (path == target_path or name == target_path or path.endswith("/" + target_path))) or \
+                   (target_sha256 and sha.lower() == target_sha256.lower()):
+                    log_info(f"Resolved from broker catalog: '{name}' (SHA-256: {sha[:12]}..., Size: {f.get('size', 0)} bytes)")
+                    return sha, path or name, name or os.path.basename(path)
+        except Exception as e:
+            log_warn(f"Catalog query failed or empty ({e}). Proceeding with explicit path/hash.")
+
+        filename = os.path.basename(target_path) if target_path else "downloaded_file.bin"
+        return target_sha256 or "", target_path or filename, filename
+
+    def create_request(self, target_path, filename, target_sha256, context, timeout_sec, vault_id=None, password=None):
+        payload = {
+            "target_sha256": target_sha256 or "",
+            "path": target_path,
+            "requester_context": context,
+            "supported_transports": ["relay"],
+        }
+        if vault_id:
+            payload["vault_id"] = vault_id
+        if password:
+            payload["password"] = password
+
+        url = f"{self.backend_url}/api/v1/request-file"
+        resp = make_request(url, method="POST", data=payload)
+        req_id = resp.get("request_id") or resp.get("requestId")
+        if not req_id:
+            raise RuntimeError(f"Broker returned unexpected response creating request: {resp}")
+        return req_id
+
+    def poll_for_completion(self, req_id, timeout_sec):
+        poll_url = f"{self.backend_url}/api/v1/request-file/{req_id}"
+        start_time = time.time()
+        poll_interval = 1.0
+
+        print(f"\n{YELLOW}{BOLD}Awaiting human authorization on mobile node...{RESET}")
+        print(f"{CYAN}Open your Android phone and tap ALLOW on the LazyVault notification.{RESET}\n")
+
+        while time.time() - start_time < timeout_sec:
+            elapsed = int(time.time() - start_time)
+            remaining = max(0, timeout_sec - elapsed)
+
+            try:
+                data = make_request(poll_url)
+                status = data.get("status", "WAITING_FOR_APPROVAL")
+
+                print(
+                    f"\r{CYAN}[POLL]{RESET} Elapsed: {elapsed:02d}s | Remaining TTL: {remaining:02d}s | Status: {BOLD}{status}{RESET}   ",
+                    end="",
+                    flush=True
+                )
+
+                if status == "REJECTED":
+                    print()
+                    log_error("Request was explicitly REJECTED by human operator on Android device.")
+                    sys.exit(1)
+
+                if status == "EXPIRED":
+                    print()
+                    log_error("Request EXPIRED (mobile notification timed out before approval).")
+                    sys.exit(1)
+
+                if status == "FAILED":
+                    print()
+                    log_error(f"Transfer failed on device: {data.get('error', 'Unknown error')}")
+                    sys.exit(1)
+
+                if status == "COMPLETED" or data.get("relay_metadata") or data.get("relayMetadata"):
+                    print()
+                    log_success("Request APPROVED! Phone encrypted and uploaded blob to relay.")
+                    return data.get("relay_metadata") or data.get("relayMetadata") or {}
+
+            except Exception:
+                pass
+
+            time.sleep(poll_interval)
+
+        print()
+        log_error(f"Operation timed out after {timeout_sec}s awaiting mobile node response.")
+        sys.exit(1)
+
+    def download_ciphertext(self, req_id, relay_meta):
+        download_url = relay_meta.get("downloadUrl") or f"{self.backend_url}/api/v1/relay/download/{req_id}"
+        log_info(f"Downloading encrypted ciphertext from: {download_url}")
+        content = make_request(download_url)
+        if isinstance(content, str):
+            content = content.encode("utf-8")
+        return content
+
+
+# ==========================================
 # Main CLI Entry Point
 # ==========================================
 
@@ -373,7 +545,6 @@ def extract_vault_id(args):
         if "v" in qs:
             return qs["v"][0].strip()
 
-    # If backend_url is just a vault id like vlt_xxxx
     if candidate.startswith("vlt_"):
         return candidate.strip()
 
@@ -392,7 +563,7 @@ def main():
     parser.add_argument(
         "--backend-url",
         default=os.environ.get("LAZYVAULT_BACKEND_URL", "https://lazyvault.web.app"),
-        help="LazyVault URL or Broker (e.g. https://lazyvault.web.app/v/<vaultId>)",
+        help="LazyVault URL or Broker (e.g. https://lazyvault.web.app/v/<vaultId> or http://localhost:4000)",
     )
     parser.add_argument(
         "--path",
@@ -406,6 +577,11 @@ def main():
         "--output",
         "-o",
         help="Destination file path for decrypted plaintext",
+    )
+    parser.add_argument(
+        "--password",
+        default=os.environ.get("LAZYVAULT_PASSWORD", ""),
+        help="Passcode for password-protected vaults",
     )
     parser.add_argument(
         "--timeout",
@@ -437,9 +613,15 @@ def main():
         sys.exit(1)
 
     vault_id = extract_vault_id(args)
+    backend_url = args.backend_url.rstrip("/")
 
-    # 1. Firestore Serverless Transport (Standard)
-    if vault_id or "lazyvault.web.app" in args.backend_url or "firebase" in args.backend_url:
+    is_firestore = (
+        ("lazyvault.web.app" in backend_url or "firebase" in backend_url or "firestore.googleapis.com" in backend_url)
+        or (vault_id and not (backend_url.startswith("http://localhost") or backend_url.startswith("http://127.0.0.1")))
+    )
+
+    # 1. Firestore Serverless Transport
+    if is_firestore:
         if not vault_id:
             log_error("Missing Vault ID. Specify via --vault-id (e.g., --vault-id vlt_95bed4ef8c) or full URL (--backend-url https://lazyvault.web.app/v/vlt_95bed4ef8c).")
             sys.exit(1)
@@ -448,7 +630,7 @@ def main():
         engine = FirestoreRelayEngine(args.project_id, args.api_key, vault_id)
 
         # Resolve Target File
-        expected_sha256, target_path, filename = engine.resolve_target(args.path, args.file_hash)
+        expected_sha256, target_path, filename = engine.resolve_target(args.path, args.file_hash, password=args.password)
         output_path = args.output or filename or "downloaded_file.bin"
 
         log_info(f"Requesting file: '{target_path}'")
@@ -475,7 +657,8 @@ def main():
         log_info("Decrypting stream with ephemeral AES-256-GCM symmetric key...")
         key = base64.b64decode(relay_meta["encryptionKeyB64"])
         iv = base64.b64decode(relay_meta["ivB64"])
-        plaintext = decrypt_aes_gcm(ciphertext, key, iv)
+        auth_tag = base64.b64decode(relay_meta["authTagB64"]) if relay_meta.get("authTagB64") else None
+        plaintext = decrypt_aes_gcm(ciphertext, key, iv, auth_tag)
 
         # Validate Integrity
         computed_sha256 = hashlib.sha256(plaintext).hexdigest().lower()
@@ -493,11 +676,66 @@ def main():
         log_success(f"Verified & saved to {output_path} ({len(plaintext)} bytes, SHA-256: {computed_sha256[:12]}...)")
         sys.exit(0)
 
-    # 2. Legacy REST Backend Fallback
+    # 2. REST Broker Transport
     else:
-        log_warn("Falling back to legacy REST broker transport...")
-        # Old localhost or custom REST server logic
-        sys.exit(1)
+        log_info(f"Connecting to LazyVault REST broker at {BOLD}{backend_url}{RESET}...")
+        engine = RestBrokerEngine(backend_url)
+
+        # Resolve Target File
+        expected_sha256, target_path, filename = engine.resolve_target(
+            args.path,
+            args.file_hash,
+            vault_id=vault_id,
+            password=args.password
+        )
+        output_path = args.output or filename or "downloaded_file.bin"
+
+        log_info(f"Requesting file: '{target_path}'")
+        if expected_sha256:
+            log_info(f"Expected SHA-256: {expected_sha256}")
+        log_info(f"Requester Context: {args.context}")
+
+        # Dispatch Request
+        log_info("Submitting lease request to REST broker...")
+        req_id = engine.create_request(
+            target_path,
+            filename,
+            expected_sha256,
+            args.context,
+            args.timeout,
+            vault_id=vault_id,
+            password=args.password
+        )
+        log_info(f"Request created! Request ID: {BOLD}{req_id}{RESET}")
+
+        # Poll for Approval
+        relay_meta = engine.poll_for_completion(req_id, args.timeout)
+
+        # Download Encrypted Blob
+        ciphertext = engine.download_ciphertext(req_id, relay_meta)
+
+        # Decrypt
+        log_info("Decrypting stream with ephemeral AES-256-GCM symmetric key...")
+        key = base64.b64decode(relay_meta["encryptionKeyB64"])
+        iv = base64.b64decode(relay_meta["ivB64"])
+        auth_tag = base64.b64decode(relay_meta["authTagB64"]) if relay_meta.get("authTagB64") else None
+        plaintext = decrypt_aes_gcm(ciphertext, key, iv, auth_tag)
+
+        # Validate Integrity
+        computed_sha256 = hashlib.sha256(plaintext).hexdigest().lower()
+        target_verify_sha = expected_sha256 or relay_meta.get("originalSha256", "") or relay_meta.get("sha256", "")
+        if target_verify_sha and computed_sha256 != target_verify_sha.lower():
+            raise ValueError(
+                f"Integrity check failed! Expected SHA-256: {target_verify_sha}, Computed: {computed_sha256}"
+            )
+
+        # Save Plaintext
+        os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+        with open(output_path, "wb") as f:
+            f.write(plaintext)
+
+        log_success(f"Verified & saved to {output_path} ({len(plaintext)} bytes, SHA-256: {computed_sha256[:12]}...)")
+        sys.exit(0)
 
 
 if __name__ == "__main__":

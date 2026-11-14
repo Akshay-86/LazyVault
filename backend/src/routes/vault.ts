@@ -1,12 +1,12 @@
 import { Router, Request, Response } from 'express';
+import crypto from 'crypto';
+import fs from 'fs';
+import path from 'path';
 import { store } from '../store.js';
 import { CatalogGeneration } from '../types.js';
 import { relayService } from '../relay.js';
 
 const router = Router();
-
-import fs from 'fs';
-import path from 'path';
 
 // Store vault metadata with disk persistence
 const vaults = new Map<string, any>();
@@ -65,7 +65,7 @@ router.post('/vault/sync', (req: Request, res: Response) => {
     const totalSize = catalog.files.reduce((acc: number, f: any) => acc + (Number(f.size) || 0), 0);
     const generation: CatalogGeneration = {
       deviceId: deviceId || 'unknown-device',
-      rootHash: catalog.rootMerkle || 'unknown-root',
+      rootHash: catalog.rootMerkle || catalog.root_hash || 'unknown-root',
       timestamp: Number(catalog.generation) || Date.now(),
       itemCount: catalog.files.length,
       totalSize,
@@ -96,6 +96,7 @@ router.post('/vault/sync', (req: Request, res: Response) => {
   saveVaultsToDisk();
 
   return res.status(200).json({
+    success: true,
     status: 'success',
     vaultId,
     shareUrl,
@@ -155,19 +156,69 @@ router.get('/vault/:id/info', (req: Request, res: Response) => {
 router.post('/vault/:id/verify-password', (req: Request, res: Response) => {
   const vaultId = req.params.id;
   const { password } = req.body;
-  const v = vaults.get(vaultId);
+  let v = vaults.get(vaultId);
+  if (!v) {
+    loadVaultsFromDisk();
+    v = vaults.get(vaultId);
+  }
 
   if (!v || !v.password || v.password.trim().length === 0) {
-    return res.json({ status: 'ok', token: 'unlocked' });
+    return res.json({ success: true, status: 'ok', token: 'unlocked' });
   }
 
   if (v.password === password) {
     console.log(`[Vault] Passcode verified successfully for vault ${vaultId}`);
-    return res.json({ status: 'ok', token: 'unlocked' });
+    return res.json({ success: true, status: 'ok', token: 'unlocked' });
   }
 
   console.warn(`[Vault] Invalid passcode attempt for vault ${vaultId}`);
-  return res.status(401).json({ error: 'Incorrect vault passcode. Check your Android device.' });
+  return res.status(401).json({ success: false, error: 'Incorrect vault passcode. Check your Android device.' });
+});
+
+// POST /api/v1/vault/:id/auth - Authenticate and return unlocked catalog
+router.post('/vault/:id/auth', (req: Request, res: Response) => {
+  const vaultId = req.params.id;
+  const { password } = req.body;
+  let v = vaults.get(vaultId);
+  if (!v) {
+    loadVaultsFromDisk();
+    v = vaults.get(vaultId);
+  }
+
+  if (!v) {
+    return res.status(404).json({ success: false, error: 'Vault not found' });
+  }
+
+  const now = Date.now();
+  if (v.expiresInSeconds && v.expiresInSeconds > 0 && v.syncedAt) {
+    if (now > v.syncedAt + v.expiresInSeconds * 1000) {
+      return res.status(410).json({ success: false, error: 'Vault share link has expired' });
+    }
+  }
+
+  if (v.password && v.password.trim().length > 0) {
+    if (v.password !== password) {
+      console.warn(`[Vault] Invalid auth attempt for vault ${vaultId}`);
+      return res.status(401).json({ success: false, error: 'Incorrect vault passcode' });
+    }
+  }
+
+  const catalog = store.getCatalog() || {
+    deviceId: v.deviceId || 'unknown',
+    rootHash: '',
+    timestamp: Date.now(),
+    itemCount: 0,
+    totalSize: 0,
+    files: [],
+  };
+
+  return res.status(200).json({
+    success: true,
+    status: 'ok',
+    token: 'unlocked',
+    vaultId,
+    catalog,
+  });
 });
 
 // GET /api/v1/vault/:id/pending-requests - Real-time polling endpoint for Android phone
@@ -242,23 +293,40 @@ router.get('/vault/:vaultId/ci-download/:sha256', async (req: Request, res: Resp
 
   console.log(`[CI-Download] Dispatched lease request ${request.id} for ${file.name}. Waiting for mobile authorization...`);
 
-  const startTime = Date.now();
-  const checkInterval = 400;
-
   const pollCompleted = () => new Promise<any>((resolve) => {
-    const timer = setInterval(() => {
-      const current = store.getRequest(request.id);
-      if (!current || current.status === 'FAILED' || current.status === 'REJECTED' || current.status === 'EXPIRED') {
-        clearInterval(timer);
+    let timer: NodeJS.Timeout | null = null;
+    const timeout = setTimeout(() => {
+      cleanup();
+      resolve(null);
+    }, 65000);
+
+    const checkState = (current: any) => {
+      if (!current) return;
+      if (current.status === 'FAILED' || current.status === 'REJECTED' || current.status === 'EXPIRED') {
+        cleanup();
         resolve(current);
       } else if (current.status === 'COMPLETED' && current.relayMetadata) {
-        clearInterval(timer);
+        cleanup();
         resolve(current);
-      } else if (Date.now() - startTime > 65000) {
-        clearInterval(timer);
-        resolve(null);
       }
-    }, checkInterval);
+    };
+
+    const onUpdate = (reqObj: any) => {
+      checkState(reqObj);
+    };
+
+    store.on(`request:${request.id}`, onUpdate);
+
+    timer = setInterval(() => {
+      const cur = store.getRequest(request.id);
+      checkState(cur);
+    }, 1000);
+
+    const cleanup = () => {
+      clearTimeout(timeout);
+      if (timer) clearInterval(timer);
+      store.off(`request:${request.id}`, onUpdate);
+    };
   });
 
   const finalReq = await pollCompleted();
@@ -274,7 +342,6 @@ router.get('/vault/:vaultId/ci-download/:sha256', async (req: Request, res: Resp
   }
 
   try {
-    const crypto = await import('crypto');
     const chunks: Buffer[] = [];
     for await (const chunk of blobInfo.stream) {
       chunks.push(chunk as Buffer);
@@ -290,9 +357,11 @@ router.get('/vault/:vaultId/ci-download/:sha256', async (req: Request, res: Resp
     decipher.setAuthTag(tag);
     const plaintext = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
 
+    const safeFilename = path.basename(file.name).replace(/["\r\n]/g, '');
+
     res.setHeader('Content-Type', 'application/octet-stream');
     res.setHeader('Content-Length', plaintext.length);
-    res.setHeader('Content-Disposition', `attachment; filename="${file.name}"`);
+    res.setHeader('Content-Disposition', `attachment; filename="${safeFilename}"`);
     return res.end(plaintext);
   } catch (err: any) {
     console.error('[CI-Download] Decryption failed:', err);
@@ -304,7 +373,8 @@ router.get('/vault/:vaultId/ci-download/:sha256', async (req: Request, res: Resp
 router.post('/vault/:id/revoke', (req: Request, res: Response) => {
   const vaultId = req.params.id;
   vaults.delete(vaultId);
-  res.json({ status: 'revoked', vaultId });
+  saveVaultsToDisk();
+  res.json({ success: true, status: 'revoked', vaultId });
 });
 
 export default router;

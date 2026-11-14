@@ -58,6 +58,7 @@ import com.google.zxing.qrcode.QRCodeWriter
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -155,13 +156,17 @@ class MainActivity : AppCompatActivity() {
         startLivePolling()
         firebaseVaultManager.startListeningForRequests { request ->
             runOnUiThread {
-                handlePendingRequests(listOf(request))
-                refreshAuditLog()
+                if (!isDestroyed && !isFinishing) {
+                    promptedRequestIds.add(request.requestId)
+                    refreshAuditLog()
+                }
             }
         }
         firebaseVaultManager.startListeningForClients { clients ->
             runOnUiThread {
-                renderConnectedClients(clients)
+                if (!isDestroyed && !isFinishing) {
+                    renderConnectedClients(clients)
+                }
             }
         }
     }
@@ -169,13 +174,14 @@ class MainActivity : AppCompatActivity() {
     override fun onPause() {
         super.onPause()
         livePollJob?.cancel()
-        firebaseVaultManager.stopListeningForClients()
+        firebaseVaultManager.stopListening()
     }
 
     override fun onDestroy() {
         super.onDestroy()
         livePollJob?.cancel()
         firebaseVaultManager.stopListening()
+        scope.cancel()
     }
 
     private fun setupUi() {
@@ -676,143 +682,15 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun handlePendingRequests(requests: List<TransferRequest>) {
-        if (requests.isEmpty()) {
-            binding.contentMain.cardIncomingRequest.visibility = View.GONE
-            return
-        }
+        if (requests.isEmpty()) return
 
-        val request = requests.first()
-        if (System.currentTimeMillis() > request.expiresAt) {
-            binding.contentMain.cardIncomingRequest.visibility = View.GONE
-            return
-        }
-
-        // 1. Trigger system heads-up notification prompt if not shown yet
-        if (!promptedRequestIds.contains(request.requestId)) {
-            promptedRequestIds.add(request.requestId)
-            VaultNotificationManager.showTransferRequestNotification(this, request)
-        }
-
-        // 2. Display In-App Alert Card
-        val filename = request.path.substringAfterLast('/')
-        val fileSize = storageManager.getFileSize(request.path, request.sha256)
-        val isLarge = fileSize >= 100 * 1024 * 1024L
-        val formattedSize = if (fileSize > 0) formatFileSize(fileSize) else ""
-        val remainingSecs = Math.max(0, ((request.expiresAt - System.currentTimeMillis()) / 1000).toInt())
-        binding.contentMain.cardIncomingRequest.visibility = View.VISIBLE
-        binding.contentMain.textIncomingFilename.text = if (isLarge) "⚠️ $filename ($formattedSize) - Large File" else if (formattedSize.isNotEmpty()) "$filename ($formattedSize)" else filename
-        binding.contentMain.textIncomingRequester.text = if (isLarge) "⚠️ Consumes $formattedSize data. Wi-Fi recommended.\nFrom: ${request.requesterContext}" else "From: ${request.requesterContext} (${request.requesterIp})"
-        binding.contentMain.textRequestTimer.text = "${remainingSecs}s"
-
-        binding.contentMain.btnDenyIncoming.setOnClickListener {
-            denyRequest(request)
-        }
-
-        binding.contentMain.btnAllowIncoming.setOnClickListener {
-            allowRequest(request)
-        }
-    }
-
-    private fun denyRequest(request: TransferRequest) {
-        binding.contentMain.cardIncomingRequest.visibility = View.GONE
-        VaultNotificationManager.dismissNotification(this, request.requestId)
-
-        prefs.addAuditEntry(
-            AuditLogEntry(
-                requestId = request.requestId,
-                path = request.path,
-                status = "REJECTED",
-                requester = request.requesterContext,
-                transport = request.supportedTransports.firstOrNull() ?: "relay",
-                timestamp = System.currentTimeMillis(),
-                details = "User tapped DENY on device"
-            )
-        )
-        refreshAuditLog()
-
-        firebaseVaultManager.updateRequestStatus(request.requestId, status = "REJECTED", decision = "DENY")
-
-        scope.launch(Dispatchers.IO) {
-            val broker = prefs.backendUrl
-            if (broker.isNotEmpty() && !broker.contains("192.168.10.15")) {
-                try {
-                    apiClient.sendDecision(
-                        backendUrl = broker,
-                        requestId = request.requestId,
-                        decision = "DENY",
-                        reason = "User tapped DENY on mobile node"
-                    )
-                } catch (ignored: Exception) {}
+        val now = System.currentTimeMillis()
+        requests.forEach { request ->
+            if (now < request.expiresAt && !promptedRequestIds.contains(request.requestId)) {
+                promptedRequestIds.add(request.requestId)
+                VaultNotificationManager.showTransferRequestNotification(this, request)
             }
         }
-        Toast.makeText(this, "Transfer request DENIED", Toast.LENGTH_SHORT).show()
-    }
-
-    private fun allowRequest(request: TransferRequest) {
-        binding.contentMain.cardIncomingRequest.visibility = View.GONE
-        VaultNotificationManager.dismissNotification(this, request.requestId)
-
-        val selectedTransport = if (request.supportedTransports.contains("webrtc")) "webrtc" else "relay"
-
-        prefs.addAuditEntry(
-            AuditLogEntry(
-                requestId = request.requestId,
-                path = request.path,
-                status = "APPROVED",
-                requester = request.requesterContext,
-                transport = selectedTransport,
-                timestamp = System.currentTimeMillis(),
-                details = "User tapped ALLOW in-app. Starting $selectedTransport stream"
-            )
-        )
-        refreshAuditLog()
-
-        firebaseVaultManager.updateRequestStatus(request.requestId, status = "APPROVED", decision = "ALLOW")
-
-        scope.launch(Dispatchers.IO) {
-            val broker = prefs.backendUrl
-            if (broker.isNotEmpty() && !broker.contains("192.168.10.15")) {
-                try {
-                    apiClient.sendDecision(
-                        backendUrl = broker,
-                        requestId = request.requestId,
-                        decision = "ALLOW",
-                        selectedTransport = selectedTransport
-                    )
-                } catch (ignored: Exception) {}
-            }
-        }
-
-        val serviceIntent = Intent(this, ForegroundDataTransferService::class.java).apply {
-            putExtra("request_id", request.requestId)
-            putExtra("path", request.path)
-            putExtra("sha256", request.sha256)
-            putStringArrayListExtra("supported_transports", ArrayList(request.supportedTransports))
-        }
-        try {
-            ContextCompat.startForegroundService(this, serviceIntent)
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to start ForegroundDataTransferService directly, trying UIDT Job fallback", e)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                try {
-                    val jobScheduler = getSystemService(Context.JOB_SCHEDULER_SERVICE) as android.app.job.JobScheduler
-                    val componentName = ComponentName(this, com.akshay.lazyvault.service.DataTransferJobService::class.java)
-                    val extras = android.os.PersistableBundle().apply {
-                        putString("request_id", request.requestId)
-                        putString("path", request.path)
-                        putString("sha256", request.sha256)
-                        putString("transports", request.supportedTransports.joinToString(","))
-                    }
-                    val jobId = (request.requestId.hashCode() and 0x7FFFFFFF)
-                    val builder = android.app.job.JobInfo.Builder(jobId, componentName)
-                        .setRequiredNetworkType(android.app.job.JobInfo.NETWORK_TYPE_ANY)
-                        .setExtras(extras)
-                        .setUserInitiated(true)
-                    jobScheduler.schedule(builder.build())
-                } catch (ignored: Exception) {}
-            }
-        }
-        Toast.makeText(this, "Transfer ALLOWED! Streaming ${request.path.substringAfterLast('/')}...", Toast.LENGTH_SHORT).show()
     }
 
     private fun renderConnectedClients(clients: List<ConnectedClient>) {

@@ -38,6 +38,7 @@ router.post('/sync', (req: Request, res: Response) => {
 
   if (!deviceId || !rootHash || !Array.isArray(files)) {
     return res.status(400).json({
+      success: false,
       error: 'Invalid catalog payload. Required fields: device_id/deviceId, root_hash/rootMerkle, files[]',
     });
   }
@@ -64,6 +65,7 @@ router.post('/sync', (req: Request, res: Response) => {
   console.log(`[Catalog] Synchronized catalog generation from device ${deviceId} (${files.length} items, root: ${rootHash.slice(0, 12)}...)`);
 
   return res.status(201).json({
+    success: true,
     status: 'success',
     item_count: generation.itemCount,
     root_hash: generation.rootHash,

@@ -6,7 +6,8 @@
   "scripts": {
     "build": "tsc",
     "start": "tsc && node dist/index.js",
-    "dev": "ts-node src/index.ts"
+    "dev": "ts-node src/index.ts",
+    "test": "node dist/test/integration.test.js"
   },
   "dependencies": {
     "@types/ws": "^8.18.1",

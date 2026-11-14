@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { CatalogItem } from '../types.js';
+import { copyToClipboard } from '../utils/clipboard.js';
 import {
   Search,
   FileCode,
@@ -27,13 +28,15 @@ export const CatalogTable: React.FC<CatalogTableProps> = ({ files, vaultId, onRe
   const [copiedHash, setCopiedHash] = useState<string | null>(null);
   const [copiedLink, setCopiedLink] = useState<string | null>(null);
 
-  const copyFileLink = (file: CatalogItem) => {
+  const copyFileLink = async (file: CatalogItem) => {
     const origin = window.location.origin;
     const base = vaultId ? `${origin}/v/${vaultId}` : window.location.href.split('?')[0];
     const url = `${base}?file=${encodeURIComponent(file.name)}`;
-    navigator.clipboard.writeText(url);
-    setCopiedLink(file.sha256);
-    setTimeout(() => setCopiedLink(null), 2000);
+    const success = await copyToClipboard(url);
+    if (success) {
+      setCopiedLink(file.sha256);
+      setTimeout(() => setCopiedLink(null), 2000);
+    }
   };
 
   const getFileIcon = (name: string) => {
@@ -60,26 +63,27 @@ export const CatalogTable: React.FC<CatalogTableProps> = ({ files, vaultId, onRe
   };
 
   const formatBytes = (bytes: number) => {
-    if (bytes === 0) return '0 B';
+    if (!bytes || bytes <= 0 || isNaN(bytes)) return '0 B';
     const k = 1024;
     const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
     const i = Math.floor(Math.log(bytes) / Math.log(k));
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
   };
 
-  const copyToClipboard = (text: string) => {
-    navigator.clipboard.writeText(text);
-    setCopiedHash(text);
-    setTimeout(() => setCopiedHash(null), 2000);
+  const handleCopyHash = async (text: string) => {
+    const success = await copyToClipboard(text);
+    if (success) {
+      setCopiedHash(text);
+      setTimeout(() => setCopiedHash(null), 2000);
+    }
   };
 
   const filteredFiles = files.filter((f) => {
     const term = search.toLowerCase();
-    return (
-      f.name.toLowerCase().includes(term) ||
-      f.path.toLowerCase().includes(term) ||
-      f.sha256.toLowerCase().includes(term)
-    );
+    const name = (f.name || '').toLowerCase();
+    const path = (f.path || '').toLowerCase();
+    const hash = (f.sha256 || '').toLowerCase();
+    return name.includes(term) || path.includes(term) || hash.includes(term);
   });
 
   return (
@@ -129,7 +133,7 @@ export const CatalogTable: React.FC<CatalogTableProps> = ({ files, vaultId, onRe
             <tbody className="divide-y divide-slate-800/60">
               {filteredFiles.map((file) => (
                 <tr
-                  key={file.sha256}
+                  key={`${file.path || file.name}-${file.sha256}`}
                   className="hover:bg-slate-800/30 transition group"
                 >
                   {/* File Name */}
@@ -165,18 +169,21 @@ export const CatalogTable: React.FC<CatalogTableProps> = ({ files, vaultId, onRe
                   {/* Checksum */}
                   <td className="py-3 px-4 hidden lg:table-cell">
                     <div className="flex items-center space-x-1.5 font-mono text-xs text-slate-400">
-                      <span>{file.sha256.slice(0, 8)}...{file.sha256.slice(-6)}</span>
-                      <button
-                        onClick={() => copyToClipboard(file.sha256)}
-                        title="Copy SHA-256 hash"
-                        className="p-1 hover:text-slate-200 rounded transition"
-                      >
-                        {copiedHash === file.sha256 ? (
-                          <Check className="h-3.5 w-3.5 text-emerald-400" />
-                        ) : (
-                          <Copy className="h-3.5 w-3.5 text-slate-500 hover:text-slate-300" />
-                        )}
-                      </button>
+                      <span>{file.sha256 ? `${file.sha256.slice(0, 8)}...${file.sha256.slice(-6)}` : 'N/A'}</span>
+                      {file.sha256 && (
+                        <button
+                          type="button"
+                          onClick={() => handleCopyHash(file.sha256)}
+                          title="Copy SHA-256 hash"
+                          className="p-1 hover:text-slate-200 rounded transition"
+                        >
+                          {copiedHash === file.sha256 ? (
+                            <Check className="h-3.5 w-3.5 text-emerald-400" />
+                          ) : (
+                            <Copy className="h-3.5 w-3.5 text-slate-500 hover:text-slate-300" />
+                          )}
+                        </button>
+                      )}
                     </div>
                   </td>
 

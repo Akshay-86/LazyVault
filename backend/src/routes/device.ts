@@ -6,10 +6,16 @@ const router = Router();
 
 // POST /api/v1/device/register - Register Android node FCM token & identity
 router.post('/register', (req: Request, res: Response) => {
-  const { device_id, device_name, fcm_token, public_key } = req.body;
+  const device_id = req.body.device_id || req.body.deviceId;
+  const device_name = req.body.device_name || req.body.deviceName;
+  const fcm_token = req.body.fcm_token || req.body.fcmToken;
+  const public_key = req.body.public_key || req.body.publicKey;
 
   if (!device_id || !fcm_token) {
-    return res.status(400).json({ error: 'device_id and fcm_token are required' });
+    return res.status(400).json({
+      success: false,
+      error: 'device_id (or deviceId) and fcm_token (or fcmToken) are required',
+    });
   }
 
   const ipAddress = (req.headers['x-forwarded-for'] as string)?.split(',')[0].trim() || req.ip || '127.0.0.1';
@@ -26,8 +32,10 @@ router.post('/register', (req: Request, res: Response) => {
   console.log(`[Device] Registered Android node ${device_id} ("${device_name || 'Default'}") from ${ipAddress}`);
 
   return res.status(200).json({
+    success: true,
     status: 'registered',
     device_id,
+    deviceId: device_id,
     timestamp: Date.now(),
   });
 });

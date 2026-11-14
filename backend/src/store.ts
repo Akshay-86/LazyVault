@@ -9,13 +9,15 @@ export class LazyVaultStore extends EventEmitter {
   private requests: Map<string, FileRequest> = new Map();
   private devices: Map<string, DeviceRegistration> = new Map();
   private signalingQueue: Map<string, SignalingMessage[]> = new Map();
-  private usedNonces: Set<string> = new Set();
+  private usedNonces: Map<string, number> = new Map();
   private cleanupInterval: NodeJS.Timeout;
   private catalogFile: string;
   private devicesFile: string;
 
   constructor() {
     super();
+    this.setMaxListeners(200);
+
     const dataDir = path.resolve(process.cwd(), 'data');
     if (!fs.existsSync(dataDir)) {
       fs.mkdirSync(dataDir, { recursive: true });
@@ -27,6 +29,9 @@ export class LazyVaultStore extends EventEmitter {
 
     // Run garbage collection on expired requests every 5 seconds
     this.cleanupInterval = setInterval(() => this.cleanupExpired(), 5000);
+    if (this.cleanupInterval.unref) {
+      this.cleanupInterval.unref();
+    }
   }
 
   private loadFromDisk(): void {
@@ -51,6 +56,15 @@ export class LazyVaultStore extends EventEmitter {
       }
     } catch (e) {
       console.warn('[Store] Could not load devices from disk:', e);
+    }
+  }
+
+  private saveDevicesToDisk(): void {
+    try {
+      const list = Array.from(this.devices.values());
+      fs.writeFileSync(this.devicesFile, JSON.stringify(list, null, 2), 'utf-8');
+    } catch (e) {
+      console.warn('[Store] Failed saving devices to disk:', e);
     }
   }
 
@@ -84,6 +98,7 @@ export class LazyVaultStore extends EventEmitter {
 
   public registerDevice(reg: DeviceRegistration): void {
     this.devices.set(reg.deviceId, reg);
+    this.saveDevicesToDisk();
     this.emit('device_registered', reg);
   }
 
@@ -119,7 +134,7 @@ export class LazyVaultStore extends EventEmitter {
     const ttlMs = 60 * 1000; // Strict 60-second TTL
     const expiresAt = now + ttlMs;
 
-    this.usedNonces.add(nonce);
+    this.usedNonces.set(nonce, now);
 
     const request: FileRequest = {
       id: requestId,
@@ -139,6 +154,10 @@ export class LazyVaultStore extends EventEmitter {
     this.requests.set(requestId, request);
     this.emit('request_created', request);
     return request;
+  }
+
+  public hasNonce(nonce: string): boolean {
+    return this.usedNonces.has(nonce);
   }
 
   public getPendingRequestsForVault(vaultId?: string): FileRequest[] {
@@ -207,6 +226,10 @@ export class LazyVaultStore extends EventEmitter {
     };
 
     const list = this.signalingQueue.get(msg.requestId) || [];
+    // Prevent memory exhaustion DoS by bounding queue size
+    if (list.length >= 200) {
+      list.shift();
+    }
     list.push(fullMsg);
     this.signalingQueue.set(msg.requestId, list);
 
@@ -226,16 +249,34 @@ export class LazyVaultStore extends EventEmitter {
 
   private cleanupExpired(): void {
     const now = Date.now();
+
+    // Expire pending requests and prune dead requests
     for (const [id, req] of this.requests.entries()) {
       if (req.status === 'WAITING_FOR_APPROVAL' && now > req.expiresAt) {
         req.status = 'EXPIRED';
         this.emit('request_updated', req);
         this.emit(`request:${id}`, req);
       }
+
+      // Clean up signaling queue for completed/terminated requests after 5 minutes
+      if (['COMPLETED', 'REJECTED', 'EXPIRED', 'FAILED'].includes(req.status)) {
+        const terminalTime = req.completedAt || req.decidedAt || req.createdAt;
+        if (now - terminalTime > 5 * 60 * 1000) {
+          this.signalingQueue.delete(id);
+        }
+      }
+
       // Purge requests older than 1 hour from memory
       if (now - req.createdAt > 3600 * 1000) {
         this.requests.delete(id);
         this.signalingQueue.delete(id);
+      }
+    }
+
+    // Prune used nonces older than 1 hour
+    for (const [nonce, ts] of this.usedNonces.entries()) {
+      if (now - ts > 3600 * 1000) {
+        this.usedNonces.delete(nonce);
       }
     }
   }

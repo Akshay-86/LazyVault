@@ -7,6 +7,7 @@
 *.apk
 *.aab
 *.ap_
+*.hprof
 output-metadata.json
 build/
 **/build/
@@ -19,21 +20,28 @@ android/app/build/
 .idea/
 !.idea/codeStyles/
 local.properties
+**/local.properties
 captures/
 .externalNativeBuild/
 .cxx/
+**/.cxx/
 
-# --- Node.js & Web Frontend ---
+# --- Node.js, TypeScript & Web Frontend ---
 node_modules/
 **/node_modules/
 dist/
 **/dist/
 .vite/
 **/.vite/
+*.tsbuildinfo
+.eslintcache
+.turbo/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
+
+# --- Firebase Hosting & Emulators ---
 .firebase/
 **/.firebase/
 firebase-debug.log*
@@ -41,13 +49,18 @@ firestore-debug.log*
 ui-debug.log*
 
 # --- Backend Ephemeral & Runtime Storage ---
-# CRITICAL: Never commit ephemeral client payloads or runtime caches
+# CRITICAL: Never commit ephemeral client payloads, relays, or runtime data
 ephemeral_relay/
-backend/ephemeral_relay/
+**/ephemeral_relay/
 backend/data/
 *.enc
+*.raw
+*.tmp
+*.temp
+tmp/
+**/tmp/
 
-# --- Python & CLI ---
+# --- Python & CLI / CI Test Artifacts ---
 __pycache__/
 **/__pycache__/
 *.py[cod]
@@ -58,7 +71,13 @@ htmlcov/
 .venv/
 venv/
 env/
+*.egg-info/
+.eggs/
+.mypy_cache/
+.ruff_cache/
 cicd_download_*
+test_download_*
+e2e_output_*
 
 # --- Secrets, Credentials, & Private Keys (NEVER COMMIT) ---
 .env
@@ -73,9 +92,16 @@ backend/serviceAccountKey.json
 *.pem
 *.key
 
-# --- Operating System & IDE Artifacts ---
+# --- Operating System & Editor Artifacts ---
 .DS_Store
+._*
+.Spotlight-V100
+.Trashes
 Thumbs.db
+ehthumbs.db
 *.swp
 *~
 *.log
+.vscode/
+*.code-workspace
+.history/

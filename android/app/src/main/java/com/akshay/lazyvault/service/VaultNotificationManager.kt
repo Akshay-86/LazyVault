@@ -56,6 +56,12 @@ object VaultNotificationManager {
     }
 
     fun showTransferRequestNotification(context: Context, request: TransferRequest) {
+        val now = System.currentTimeMillis()
+        if (request.expiresAt > 0 && now >= request.expiresAt) {
+            // Request is already expired; do not notify
+            return
+        }
+
         createNotificationChannels(context)
         val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
 
@@ -63,6 +69,9 @@ object VaultNotificationManager {
         val fileSize = com.akshay.lazyvault.storage.VaultStorageManager(context).getFileSize(request.path, request.sha256)
         val isLargeFile = fileSize >= 100 * 1024 * 1024L
         val sizeStr = if (fileSize > 0) formatBytes(fileSize) else ""
+
+        val remainingMs = if (request.expiresAt > now) (request.expiresAt - now) else 60000L
+        val safeTimeoutMs = remainingMs.coerceIn(1000L, 60000L)
 
         val contentIntent = Intent(context, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
@@ -128,6 +137,9 @@ object VaultNotificationManager {
             .setCategory(NotificationCompat.CATEGORY_ALARM)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setAutoCancel(true)
+            .setTimeoutAfter(safeTimeoutMs)
+            .setShowWhen(true)
+            .setWhen(request.expiresAt)
             .setContentIntent(contentPendingIntent)
             .addAction(0, "ALLOW", allowPendingIntent)
             .addAction(0, "DENY", denyPendingIntent)

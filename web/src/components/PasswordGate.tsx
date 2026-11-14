@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { Lock, ArrowRight, Eye, EyeOff, Loader2 } from 'lucide-react';
 import { db } from '../firebase.js';
 import { doc, getDoc } from 'firebase/firestore';
+import { hashStringSha256 } from '../utils/crypto.js';
 
 interface PasswordGateProps {
   vaultId: string;
@@ -25,26 +26,24 @@ export const PasswordGate: React.FC<PasswordGateProps> = ({ vaultId, backendUrl,
 
     try {
       // 1. Try checking against Cloud Firestore (Serverless)
-      const docSnap = await getDoc(doc(db, 'vaults', vaultId));
-      if (docSnap.exists()) {
-        const vaultData = docSnap.data();
-        if (vaultData.passwordHash) {
-          const encoder = new TextEncoder();
-          const data = encoder.encode(password);
-          const hashBuffer = await crypto.subtle.digest('SHA-256', data);
-          const hashArray = Array.from(new Uint8Array(hashBuffer));
-          const enteredHash = hashArray.map((b) => b.toString(16).padStart(2, '0')).join('');
+      if (db) {
+        const docSnap = await getDoc(doc(db, 'vaults', vaultId));
+        if (docSnap.exists()) {
+          const vaultData = docSnap.data();
+          if (vaultData.passwordHash) {
+            const enteredHash = await hashStringSha256(password);
 
-          if (enteredHash === vaultData.passwordHash) {
+            if (enteredHash.toLowerCase() === vaultData.passwordHash.toLowerCase()) {
+              onUnlocked();
+              return;
+            } else {
+              throw new Error('Incorrect passcode. Please try again.');
+            }
+          } else {
+            // No password required
             onUnlocked();
             return;
-          } else {
-            throw new Error('Incorrect passcode. Please try again.');
           }
-        } else {
-          // No password required
-          onUnlocked();
-          return;
         }
       }
 
@@ -66,7 +65,7 @@ export const PasswordGate: React.FC<PasswordGateProps> = ({ vaultId, backendUrl,
         throw new Error('Vault not found. Please verify the URL.');
       }
     } catch (err: any) {
-      setError(err.message);
+      setError(err.message || 'Verification failed');
     } finally {
       setIsLoading(false);
     }
@@ -108,6 +107,7 @@ export const PasswordGate: React.FC<PasswordGateProps> = ({ vaultId, backendUrl,
                 type="button"
                 onClick={() => setShowPassword(!showPassword)}
                 className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-300 transition"
+                tabIndex={-1}
               >
                 {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
               </button>

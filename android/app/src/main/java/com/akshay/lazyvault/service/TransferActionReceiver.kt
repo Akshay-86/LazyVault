@@ -58,23 +58,45 @@ class TransferActionReceiver : BroadcastReceiver() {
                 VaultNotificationManager.dismissNotification(context, requestId)
                 FirebaseVaultManager(context).updateRequestStatus(requestId, status = "REJECTED", decision = "DENY")
 
+                val pendingResult = goAsync()
                 scope.launch {
-                    if (backendUrl.isNotEmpty() && !backendUrl.contains("192.168.10.15")) {
-                        try {
-                            apiClient.sendDecision(
-                                backendUrl = backendUrl,
-                                requestId = requestId,
-                                decision = "DENY",
-                                reason = "User explicitly denied request on Android node"
-                            )
-                        } catch (ignored: Exception) {}
+                    try {
+                        if (backendUrl.isNotEmpty() && !backendUrl.contains("192.168.10.15")) {
+                            try {
+                                apiClient.sendDecision(
+                                    backendUrl = backendUrl,
+                                    requestId = requestId,
+                                    decision = "DENY",
+                                    reason = "User explicitly denied request on Android node"
+                                )
+                            } catch (ignored: Exception) {}
+                        }
+                    } finally {
+                        pendingResult.finish()
                     }
                 }
             }
 
             ACTION_ALLOW -> {
-                Log.d(TAG, "Transfer ALLOWED by user for $requestId. Determining transport...")
+                val expiresAt = intent.getLongExtra("expires_at", 0L)
+                val now = System.currentTimeMillis()
+
                 VaultNotificationManager.dismissNotification(context, requestId)
+
+                if (expiresAt > 0 && now >= expiresAt) {
+                    Log.w(TAG, "Transfer request $requestId expired before user tapped ALLOW (now=$now, expiresAt=$expiresAt)")
+                    FirebaseVaultManager(context).updateRequestStatus(requestId, status = "EXPIRED", decision = "EXPIRED")
+                    android.os.Handler(android.os.Looper.getMainLooper()).post {
+                        android.widget.Toast.makeText(
+                            context,
+                            "Transfer request expired (limit reached)",
+                            android.widget.Toast.LENGTH_LONG
+                        ).show()
+                    }
+                    return
+                }
+
+                Log.d(TAG, "Transfer ALLOWED by user for $requestId. Determining transport...")
                 val selectedTransport = if (transports.contains("webrtc")) "webrtc" else "relay"
 
                 prefs.addAuditEntry(
@@ -91,16 +113,21 @@ class TransferActionReceiver : BroadcastReceiver() {
 
                 FirebaseVaultManager(context).updateRequestStatus(requestId, status = "APPROVED", decision = "ALLOW")
 
+                val pendingResult = goAsync()
                 scope.launch {
-                    if (backendUrl.isNotEmpty() && !backendUrl.contains("192.168.10.15")) {
-                        try {
-                            apiClient.sendDecision(
-                                backendUrl = backendUrl,
-                                requestId = requestId,
-                                decision = "ALLOW",
-                                selectedTransport = selectedTransport
-                            )
-                        } catch (ignored: Exception) {}
+                    try {
+                        if (backendUrl.isNotEmpty() && !backendUrl.contains("192.168.10.15")) {
+                            try {
+                                apiClient.sendDecision(
+                                    backendUrl = backendUrl,
+                                    requestId = requestId,
+                                    decision = "ALLOW",
+                                    selectedTransport = selectedTransport
+                                )
+                            } catch (ignored: Exception) {}
+                        }
+                    } finally {
+                        pendingResult.finish()
                     }
                 }
 
@@ -144,6 +171,9 @@ class TransferActionReceiver : BroadcastReceiver() {
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             builder.setUserInitiated(true)
+            val fileSize = com.akshay.lazyvault.storage.VaultStorageManager(context).getFileSize(path, sha256)
+            val estimatedBytes: Long = if (fileSize > 0L) fileSize else -1L
+            builder.setEstimatedNetworkBytes(estimatedBytes, -1L)
         }
 
         val result = jobScheduler.schedule(builder.build())

@@ -7,33 +7,36 @@ const router = Router();
 
 // POST /api/v1/request-file
 router.post('/', async (req: Request, res: Response) => {
-  const { target_sha256, path, requester_context, supported_transports, vault_id, vaultId } = req.body;
+  const targetSha256 = req.body.target_sha256 || req.body.sha256 || req.body.targetSha256;
+  const filePath = req.body.path;
+  const requesterContext = req.body.requester_context || req.body.requesterContext || 'Anonymous Requester';
+  const supportedTransportsRaw = req.body.supported_transports || req.body.supportedTransports;
+  const vaultId = req.body.vault_id || req.body.vaultId;
 
-  if (!target_sha256 || !path) {
+  if (!targetSha256 || !filePath) {
     return res.status(400).json({
-      error: 'Missing required parameters: target_sha256 and path are required.',
+      success: false,
+      error: 'Missing required parameters: target_sha256 (or sha256) and path are required.',
     });
   }
 
   // Validate supported transports
-  const transports: TransportType[] = Array.isArray(supported_transports) && supported_transports.length > 0
-    ? supported_transports
+  const transports: TransportType[] = Array.isArray(supportedTransportsRaw) && supportedTransportsRaw.length > 0
+    ? supportedTransportsRaw
     : ['webrtc', 'relay'];
 
   const requesterIp = (req.headers['x-forwarded-for'] as string)?.split(',')[0].trim() || req.ip || '127.0.0.1';
   const requesterUserAgent = req.headers['user-agent'] || 'Unknown Client';
-  const requesterContext = requester_context || 'Anonymous Requester';
-  const finalVaultId = vault_id || vaultId;
 
   // Create request with strict 60s TTL
   const request = store.createRequest({
-    targetSha256: target_sha256,
-    path,
+    targetSha256,
+    path: filePath,
     requesterContext,
     requesterIp,
     requesterUserAgent,
     supportedTransports: transports,
-    vaultId: finalVaultId,
+    vaultId,
   });
 
   // Look up registered device
@@ -42,17 +45,22 @@ router.post('/', async (req: Request, res: Response) => {
   // Dispatch high-priority trigger
   const dispatchResult = await fcmService.dispatchApprovalRequest(device?.fcmToken, request);
 
-  console.log(`[Request] Created request ${request.id} for ${path} (${request.targetSha256.slice(0, 10)}...). TTL: 60s. FCM dispatched: ${dispatchResult.sentViaFcm}`);
+  console.log(`[Request] Created request ${request.id} for ${filePath} (${request.targetSha256.slice(0, 10)}...). TTL: 60s. FCM dispatched: ${dispatchResult.sentViaFcm}`);
 
   return res.status(202).json({
+    success: true,
     request_id: request.id,
+    requestId: request.id,
     status: request.status,
     nonce: request.nonce,
     path: request.path,
     target_sha256: request.targetSha256,
+    targetSha256: request.targetSha256,
     expires_at: request.expiresAt,
     ttl_seconds: 60,
+    leaseTtlSeconds: 60,
     supported_transports: request.supportedTransports,
+    supportedTransports: request.supportedTransports,
     message: 'Request dispatched to dormant mobile node. Awaiting user authorization.',
   });
 });
@@ -66,6 +74,7 @@ router.get('/:id', (req: Request, res: Response) => {
 
   return res.status(200).json({
     request_id: request.id,
+    requestId: request.id,
     status: request.status,
     path: request.path,
     target_sha256: request.targetSha256,
@@ -75,6 +84,7 @@ router.get('/:id', (req: Request, res: Response) => {
     decided_at: request.decidedAt,
     completed_at: request.completedAt,
     relay_metadata: request.relayMetadata,
+    relayMetadata: request.relayMetadata,
     error: request.error,
   });
 });
@@ -100,6 +110,7 @@ router.get('/:id/events', (req: Request, res: Response) => {
     if (updated.id === requestId) {
       res.write(`data: ${JSON.stringify(updated)}\n\n`);
       if (['COMPLETED', 'REJECTED', 'EXPIRED', 'FAILED'].includes(updated.status)) {
+        store.off(`request:${requestId}`, onUpdate);
         res.end();
       }
     }
@@ -114,39 +125,45 @@ router.get('/:id/events', (req: Request, res: Response) => {
 
 // POST /api/v1/request-file/:id/decision - Device submits ALLOW or DENY
 router.post('/:id/decision', (req: Request, res: Response) => {
-  const { decision, chosen_transport } = req.body;
+  const { decision, chosen_transport, selected_transport, chosenTransport } = req.body;
   const requestId = req.params.id;
 
   const current = store.getRequest(requestId);
   if (!current) {
-    return res.status(404).json({ error: 'Request not found or expired' });
+    return res.status(404).json({ success: false, error: 'Request not found or expired' });
   }
 
   if (Date.now() > current.expiresAt) {
     store.updateRequestStatus(requestId, 'EXPIRED');
-    return res.status(410).json({ error: 'Request has already expired (60s TTL breached).' });
+    return res.status(410).json({ success: false, error: 'Request has already expired (60s TTL breached).' });
   }
 
   if (['REJECTED', 'APPROVED', 'COMPLETED'].includes(current.status)) {
-    return res.status(409).json({ error: `Request already has terminal state: ${current.status}` });
+    return res.status(409).json({ success: false, error: `Request already has terminal state: ${current.status}` });
   }
 
   if (decision === 'DENY') {
     const updated = store.updateRequestStatus(requestId, 'REJECTED');
     console.log(`[Request] Request ${requestId} explicitly REJECTED by user.`);
-    return res.status(200).json({ status: 'REJECTED', request: updated });
+    return res.status(200).json({ success: true, status: 'REJECTED', request: updated });
   }
 
   if (decision === 'ALLOW') {
-    const transport = chosen_transport || (current.supportedTransports.includes('webrtc') ? 'webrtc' : 'relay');
+    const transport = chosen_transport || selected_transport || chosenTransport || (current.supportedTransports.includes('webrtc') ? 'webrtc' : 'relay');
     const updated = store.updateRequestStatus(requestId, 'APPROVED', {
       chosenTransport: transport,
     });
     console.log(`[Request] Request ${requestId} explicitly APPROVED by user. Chosen transport: ${transport}`);
-    return res.status(200).json({ status: 'APPROVED', chosen_transport: transport, request: updated });
+    return res.status(200).json({
+      success: true,
+      status: 'APPROVED',
+      chosen_transport: transport,
+      chosenTransport: transport,
+      request: updated,
+    });
   }
 
-  return res.status(400).json({ error: 'Invalid decision. Must be ALLOW or DENY.' });
+  return res.status(400).json({ success: false, error: 'Invalid decision. Must be ALLOW or DENY.' });
 });
 
 // POST /api/v1/request-file/:id/status - Update state during transfer
@@ -164,7 +181,7 @@ router.post('/:id/status', (req: Request, res: Response) => {
     return res.status(404).json({ error: 'Request not found or in terminal state' });
   }
 
-  return res.status(200).json({ status: updated.status, request: updated });
+  return res.status(200).json({ success: true, status: updated.status, request: updated });
 });
 
 export default router;
